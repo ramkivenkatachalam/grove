@@ -9,6 +9,8 @@ import './styles.css'
 const hub = window.hub
 // a feature's services and ports; registries from before projects had fePort / bePort
 const portsOf = (f) => f.ports || Object.fromEntries(Object.entries({ be: f.bePort, fe: f.fePort }).filter(([, v]) => v))
+// sessions sit in the project's main checkout (or a folder of it)
+const state_repo = (f) => f.path
 const STAGES = ['Explore', 'Design', 'Spec', 'Build', 'Verify', 'PR', 'Review', 'Merged']
 // a glyph and a word for every state: colour only reinforces
 const STATE = {
@@ -235,7 +237,7 @@ function Header({ f, pal, panels, openList, onToggle }) {
         </span>
         <span className="grow" />
         <span className="facts">
-          {pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
+          {f.kind === 'session' ? <span>{f.path === state_repo(f) ? 'main checkout' : 'session'} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
           {ci && <span style={{ color: ci[0] === 'ready' ? pal.ready : ci[0] }}>{ci[1]}</span>}
           {pr && pr.state !== 'OPEN' && <span>{pr.state.toLowerCase()}</span>}
           {pr?.findings > 0 && <span style={{ color: pal.accent }}>{pr.findings} finding{pr.findings > 1 ? 's' : ''}</span>}
@@ -246,7 +248,7 @@ function Header({ f, pal, panels, openList, onToggle }) {
         </span>
       </div>
       <div className="hrow">
-        <span className="track" aria-label={`Stage ${stage + 1} of 8: ${STAGES[stage]}`}>
+        {f.kind !== 'session' && <span className="track" aria-label={`Stage ${stage + 1} of 8: ${STAGES[stage]}`}>
           {STAGES.map((s, i) => (
             <span key={s}>
               {i > 0 && <span className="sep">─</span>}
@@ -254,7 +256,7 @@ function Header({ f, pal, panels, openList, onToggle }) {
             </span>
           ))}
           {d.stage?.note && <span className="done">   {d.stage.note}</span>}
-        </span>
+        </span>}
         <span className="grow" />
         <span className="toggles">
           {panels.map((p) => {
