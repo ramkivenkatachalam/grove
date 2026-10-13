@@ -1,0 +1,1196 @@
+#!/usr/bin/env python3
+"""fh — Grove's command line: one git worktree, branch, set of ports, dev servers and Claude session
+per feature, for any project described by a project config (see `fh project`).
+
+  fh new <name|TICKET-123> [--project P] [--title T] [--parent NAME] [--base REF] [-p PROMPT]
+                         worktree on <you>/<name>, its own ports, env rewritten, deps prepared,
+                         servers up, Claude briefed (ticket / prompt)
+  fh ls                  features, ports, servers, labels, PR/CI, session state
+  fh go <name>           (tmux UI) switch to the feature's window
+  fh up|down|restart <name>   start / stop / restart the feature's services
+  fh rename <name> <title…>   the display title (worktree, branch and ports keep the name)
+  fh pr [--force]        refresh the PR/CI cache (gh), at most every 3 minutes unless forced
+  fh findings <name> [--brief] [--mark]   unanswered claude[bot]/Copilot review comments
+  fh clean [--yes]       list (or remove) features whose PR merged and whose tree is clean
+  fh done <name>         stop everything and unregister; the worktree is kept
+  fh doctor              check projects and features: files, deps, ports, env, labels
+
+  fh project ls                       projects and which one is the default
+  fh project add <repo> [--name N]    register a repo (reads its .grove.json, or writes a starter)
+  fh project default <name>           the project `fh new` uses outside any project directory
+  fh project show <name>              the merged config
+
+  fh host <name>         (app) every pane in its own tmux session; prints JSON
+  fh ui [app|tmux]       which front end new features open in
+  fh theme [palette]     header palette (claude, plum, teal, wine, forest, slate)
+  fh toggle <name> <panel> · fh relayout <name> · fh attach      (tmux UI)
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+HUB = Path(os.environ.get("GROVE_HUB", HOME / ".claude/feature-hub"))
+REG, STATUS, BRIEFS, PROJECTS = HUB / "features", HUB / "status", HUB / "briefs", HUB / "projects"
+PRS, FEEDBACK, CONFIG, THEME = HUB / "prs.json", HUB / "feedback.json", HUB / "config.json", HUB / "theme.json"
+FH = os.environ.get("GROVE_BIN", str(HUB / "bin/fh"))
+SESSION = "features"
+PARK = "fh-park"  # tmux UI: a detached session where closed panels keep running
+PR_TTL = 180
+BOTS = ("claude[bot]", "copilot")
+TICKET = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
+
+for d in (REG, STATUS, BRIEFS, PROJECTS):
+    d.mkdir(parents=True, exist_ok=True)
+
+
+def die(msg: str) -> None:
+    print(f"fh: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(argv, cwd=None, check=False) -> subprocess.CompletedProcess:
+    r = subprocess.run(argv, cwd=cwd, text=True, capture_output=True)
+    if check and r.returncode:
+        die(f"{' '.join(str(a) for a in argv[:3])}…: {r.stderr.strip() or r.stdout.strip()}")
+    return r
+
+
+def read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path: Path, value) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def expand(path: str) -> Path:
+    return Path(os.path.expanduser(path)).resolve()
+
+
+# ---------- projects ----------
+#
+# A project config says how to grow a feature from a repo. It is the repo's own `.grove.json`
+# (shareable, committed by the team) merged under ~/.claude/feature-hub/projects/<name>.json
+# (yours: at least {"repo": …}; anything here overrides the repo's file).
+#
+#   repo          the main checkout                        worktrees  where worktrees go (default: beside repo)
+#   base          start point for new branches (origin/main)   branchPrefix  "{user}/" by default
+#   setup         {"link": [...], "clone": [...], "copy": [...], "run": [...]}, paths relative to the repo:
+#                 link = symlink to the main checkout's copy; clone = APFS copy-on-write clone;
+#                 copy = copy if missing (env files); run = shell commands in the new worktree
+#   services      [{"name", "dir", "run", "ports": [lo, hi], "reserved": [...], "key", "hint", "open"}]
+#                 run / hint / open may use {port}, {<service>}, {name}, {path}
+#   env           [{"file", "port": {"KEY": "<service>"}, "set": {"KEY": "value with {fe}"}}]:
+#                 port = rewrite localhost:NNNN in that line; set = the whole value (added if missing)
+#   labels        [{"name", "file", "key", "rules": [[regex, label], ...], "warn": [labels]}]
+#   checks        what the agent should run before finishing      agentNotes  extra lines for the agent
+#   panels        extra panels: [{"name", "key", "run", "dir"}]
+
+DEFAULT_PROJECT = {
+    "base": "origin/main",
+    "branchPrefix": "{user}/",
+    "setup": {"link": [], "clone": [], "copy": [], "run": []},
+    "services": [],
+    "env": [],
+    "labels": [],
+    "checks": "Run the tests and linters that cover what you touched.",
+    "agentNotes": "",
+    "panels": [],
+}
+
+
+def project_names() -> list[str]:
+    return sorted(p.stem for p in PROJECTS.glob("*.json"))
+
+
+def project(name: str) -> dict:
+    mine = read_json(PROJECTS / f"{name}.json", None)
+    if mine is None:
+        die(f"no project '{name}' (fh project ls)")
+    repo = expand(mine.get("repo", ""))
+    shared = read_json(repo / ".grove.json", {})
+    p = {**DEFAULT_PROJECT, **shared, **mine}
+    p["setup"] = {**DEFAULT_PROJECT["setup"], **shared.get("setup", {}), **mine.get("setup", {})}
+    p["name"], p["repo"] = name, repo
+    p["worktrees"] = expand(p["worktrees"]) if p.get("worktrees") else repo.parent
+    return p
+
+
+def default_project() -> str:
+    names = project_names()
+    chosen = read_json(CONFIG, {}).get("defaultProject")
+    if chosen in names:
+        return chosen
+    if len(names) == 1:
+        return names[0]
+    die("no project chosen: fh project add <repo>, or fh new … --project <name>"
+        + (f" (projects: {', '.join(names)})" if names else ""))
+
+
+def project_here() -> str | None:
+    cwd = os.getcwd()
+    for f in features():
+        if cwd == f["path"] or cwd.startswith(f["path"] + "/"):
+            return f.get("project")
+    for name in project_names():
+        repo = str(project(name)["repo"])
+        if cwd == repo or cwd.startswith(repo + "/"):
+            return name
+    return None
+
+
+def services(p: dict) -> list[dict]:
+    return [s for s in p.get("services", []) if s.get("name")]
+
+
+def handle(p: dict) -> str:
+    if os.environ.get("FH_USER"):
+        return os.environ["FH_USER"]
+    email = run(["git", "-C", str(p["repo"]), "config", "user.email"]).stdout.strip()
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", email.split("@")[0]) or os.environ.get("USER", "me")
+
+
+def fill(text: str, f: dict, port: int | None = None) -> str:
+    """{port}, {<service>}, {name}, {path}, {fh} in config strings; anything else is left as written."""
+    values = {"name": f["name"], "path": f["path"], "fh": FH, **{k: str(v) for k, v in ports(f).items()}}
+    if port is not None:
+        values["port"] = str(port)
+    return re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), text)
+
+
+# ---------- registry ----------
+
+def features() -> list[dict]:
+    rows = [read_json(p, None) for p in sorted(REG.glob("*.json"))]
+    return [r for r in rows if r]
+
+
+def feature(name: str) -> dict:
+    f = read_json(REG / f"{name}.json", None)
+    if not f:
+        die(f"no feature '{name}' (fh ls)")
+    return f
+
+
+def ports(f: dict) -> dict[str, int]:
+    if "ports" in f:
+        return f["ports"]
+    return {k: f[v] for k, v in (("fe", "fePort"), ("be", "bePort")) if v in f}  # before projects
+
+
+def project_of(f: dict) -> dict:
+    return project(f.get("project") or default_project())
+
+
+# ---------- ports & processes ----------
+
+def listening() -> set[int]:
+    out = run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fn"]).stdout
+    return {int(m) for m in re.findall(r"^n.*:(\d+)$", out, re.M)}
+
+
+def alloc(service: dict, taken: set[int]) -> int:
+    lo, hi = (service.get("ports") or [4000, 4999])[:2]
+    for port in range(lo, hi + 1):
+        if port not in taken and port not in set(service.get("reserved", [])):
+            return port
+    die(f"no free port for {service['name']} in {lo}-{hi}; `fh done` a feature first")
+
+
+def stop_port(port: int) -> None:
+    pids = run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"]).stdout.split()
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    # a --reload supervisor respawns its worker: wait, then force
+    for _ in range(12):
+        if not run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"]).stdout.strip():
+            return
+        time.sleep(0.5)
+    for pid in run(["lsof", "-ti", f"tcp:{port}"]).stdout.split():
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+# ---------- worktree provisioning ----------
+
+def set_env_key(lines: list[str], key: str, fn) -> bool:
+    hit = False
+    for i, line in enumerate(lines):
+        if line.startswith(f"{key}="):
+            lines[i] = fn(line)
+            hit = True
+    return hit
+
+
+def provision(p: dict, f: dict) -> None:
+    repo, wt = p["repo"], Path(f["path"])
+    setup = p["setup"]
+    for rel in setup.get("link", []):
+        if not (wt / rel).exists() and (repo / rel).exists():
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (wt / rel).symlink_to(repo / rel)
+    for rel in setup.get("clone", []):
+        if not (wt / rel).exists() and (repo / rel).is_dir():
+            print(f"cloning {rel} (copy-on-write)…")
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            run(["cp", "-Rc", str(repo / rel), str(wt / rel)], check=True)
+    for rel in setup.get("copy", []):
+        if not (wt / rel).exists() and (repo / rel).exists():
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (wt / rel).write_bytes((repo / rel).read_bytes())
+    for rule in p.get("env", []):
+        path = wt / rule["file"]
+        if not path.exists():
+            continue
+        lines = path.read_text().splitlines()
+        for key, svc in rule.get("port", {}).items():
+            port = ports(f).get(svc)
+            if port:
+                set_env_key(lines, key, lambda l, port=port: re.sub(r"localhost:\d+", f"localhost:{port}", l))
+        for key, value in rule.get("set", {}).items():
+            value = fill(value, f)
+            if not set_env_key(lines, key, lambda l, value=value, key=key: f"{key}={value}"):
+                lines.append(f"{key}={value}")
+        path.write_text("\n".join(lines) + "\n")
+    for cmd in setup.get("run", []):
+        print(f"setup: {cmd}")
+        r = subprocess.run(["bash", "-lc", fill(cmd, f)], cwd=wt)
+        if r.returncode:
+            print(f"fh: setup step failed ({r.returncode}): {cmd}", file=sys.stderr)
+
+
+def labels(p: dict, f: dict) -> list[tuple[str, str]]:
+    """[(name, label)] from the project's label rules: the last uncommented KEY=… line wins."""
+    out = []
+    for rule in p.get("labels", []):
+        try:
+            text = (Path(f["path"]) / rule["file"]).read_text()
+        except OSError:
+            out.append((rule["name"], "?"))
+            continue
+        values = re.findall(rf"^\s*{re.escape(rule['key'])}\s*=\s*(.*)$", text, re.M)
+        if not values:
+            out.append((rule["name"], "none"))
+            continue
+        value = values[-1]
+        label = next((lab for rx, lab in rule.get("rules", []) if re.search(rx, value)), None)
+        out.append((rule["name"], label or value.split("@")[-1].split("/")[0][:16]))
+    return out
+
+
+# ---------- panes: claude, shell, every service, extra panels ----------
+
+def layout(f: dict) -> list[dict]:
+    p = project_of(f)
+    panes = [{"name": "claude", "run": "{fh} agent {name}", "dir": ""},
+             {"name": "shell", "key": "s", "run": "", "dir": "", "focus": True}]
+    for s in services(p):
+        panes.append({"name": s["name"], "key": s.get("key", ""), "run": "{fh} serve " + s["name"] + " {name}",
+                      "dir": s.get("dir", ""), "service": True})
+    panes += [x for x in p.get("panels", []) if x.get("name")]
+    used = set()
+    for pane in panes[1:]:  # a unique key per panel: given, else its first free letter
+        key = pane.get("key") or next((c for c in pane["name"].lower() if c.isalpha() and c not in used), "")
+        pane["key"] = key if key not in used else ""
+        used.add(pane["key"])
+    return panes
+
+
+def panels(f: dict) -> list[dict]:
+    return [x for x in layout(f) if x["name"] != "claude"]
+
+
+def pane_cmd(cmd: str) -> str:
+    return f"{cmd}; exec $SHELL"
+
+
+def pane_run(pane: dict, f: dict, servers: bool) -> str:
+    if pane.get("service") and not servers:
+        return pane_cmd(f"echo '{pane['name']} stopped — fh up {f['name']}'")
+    cmd = fill(pane.get("run") or "", f)
+    return pane_cmd(cmd) if cmd else ""
+
+
+def hint(f: dict, pane: str) -> str:
+    if pane == "shell":
+        return f"worktree {f['path'].replace(str(HOME), '~')}"
+    service = next((s for s in services(project_of(f)) if s["name"] == pane), None)
+    port = ports(f).get(pane)
+    if service and service.get("hint"):
+        return fill(service["hint"], f, port)
+    return f":{port}" if port else ""
+
+
+# ---------- tmux ----------
+
+def tmux(*args) -> subprocess.CompletedProcess:
+    return run(["tmux", *args])
+
+
+def ui_mode() -> str:
+    """'app' when the Grove app is the front end, else 'tmux' (windows in session `features`)."""
+    return read_json(CONFIG, {}).get("ui", "tmux")
+
+
+DEFAULT_THEME = {
+    "_help": "fh theme <name> switches the palette. Text on band is #eeeeee (main) and #bcbcbc "
+             "(secondary); pills use black text. Keep every pair >= 4.5:1.",
+    "palette": "claude",
+    "palettes": {
+        "claude": {"band": "#3a2822", "name": "#d77757", "accent": "#e8957a", "waiting": "#ffc2a6", "working": "#b8bccb", "ready": "#8fdcb4"},
+        "plum":   {"band": "#3d2350", "name": "#e2c4ff", "accent": "#ff9b7a", "waiting": "#ff9b7a", "working": "#b9bce8", "ready": "#86e0aa"},
+        "teal":   {"band": "#123f42", "name": "#9fe6d8", "accent": "#ffa38a", "waiting": "#ffa38a", "working": "#b0c8e6", "ready": "#c2e88f"},
+        "wine":   {"band": "#4a1c2c", "name": "#f5cba7", "accent": "#ff9fb0", "waiting": "#ff9fb0", "working": "#cdbdf2", "ready": "#9de3b4"},
+        "forest": {"band": "#1d3a2a", "name": "#d4ecb4", "accent": "#ffa585", "waiting": "#ffa585", "working": "#b0c9e8", "ready": "#8fe0c4"},
+        "slate":  {"band": "#2a3247", "name": "#c9d3ff", "accent": "#ff9c87", "waiting": "#ff9c87", "working": "#b8bccb", "ready": "#8fdcb4"},
+    },
+}
+
+
+def theme() -> dict:
+    if not THEME.exists():
+        write_json(THEME, DEFAULT_THEME)
+    t = read_json(THEME, DEFAULT_THEME)
+    pal = dict(DEFAULT_THEME["palettes"]["claude"])
+    pal.update((t.get("palettes") or {}).get(t.get("palette", "claude"), {}))
+    band = pal["band"].lstrip("#")
+    rgb = [int(band[i:i + 2], 16) for i in (0, 2, 4)]
+    pal["off"] = "#" + "".join(f"{round(c * 0.86 + 255 * 0.14):02x}" for c in rgb)  # 14% white over band
+    return pal
+
+
+def apply_theme() -> None:
+    pal = theme()
+    for key in ("band", "name", "accent", "off"):
+        tmux("set-option", "-g", f"@fh_c_{key}", pal[key])
+    tmux("set-option", "-g", "pane-active-border-style", f"fg={pal['name']}")
+
+
+def ensure_session() -> None:
+    if run(["which", "tmux"]).returncode:
+        die("tmux is not installed: brew install tmux")
+    apply_theme()
+    if ui_mode() == "app":
+        return
+    if tmux("has-session", "-t", SESSION).returncode:
+        names = project_names()
+        start = str(project(names[0])["repo"]) if names else str(HOME)
+        tmux("new-session", "-d", "-s", SESSION, "-n", "hub", "-c", start)
+        tmux("send-keys", "-t", f"{SESSION}:hub", f"{FH} ls", "C-m")
+
+
+def has_window(name: str) -> bool:
+    if tmux("has-session", "-t", SESSION).returncode:
+        return False
+    return name in tmux("list-windows", "-t", SESSION, "-F", "#W").stdout.split()
+
+
+def owned_panes(name: str) -> list[dict]:
+    """Every pane of a feature (tmux window, park or app sessions), as {id, pane, window, session}."""
+    out = tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@fh_owner}\t#{@fh_pane}\t#{window_id}\t#{session_name}").stdout
+    rows = []
+    for line in out.splitlines():
+        pid, owner, pane, wid, sess = (line.split("\t") + [""] * 5)[:5]
+        if owner == name:
+            rows.append({"id": pid, "pane": pane, "window": wid, "session": sess})
+    return rows
+
+
+def find_pane(name: str, pane: str) -> str | None:
+    return next((r["id"] for r in owned_panes(name) if r["pane"] == pane), None)
+
+
+def tag(pane_id: str, owner: str, pane: str) -> None:
+    tmux("set-option", "-p", "-t", pane_id, "@fh_owner", owner)
+    tmux("set-option", "-p", "-t", pane_id, "@fh_pane", pane)
+
+
+def ensure_park() -> None:
+    if tmux("has-session", "-t", PARK).returncode:
+        tmux("new-session", "-d", "-s", PARK, "-n", "park", "sleep 2147483647")
+
+
+def park_new(f: dict, pane: dict, servers: bool) -> str:
+    """tmux UI: start a panel closed, in its own window of the park session."""
+    ensure_park()
+    cmd = pane_run(pane, f, servers)
+    r = tmux("new-window", "-d", "-a", "-P", "-F", "#{pane_id}", "-t", f"{PARK}:", "-n", f"{f['name']}_{pane['name']}",
+             "-c", str(Path(f["path"]) / pane.get("dir", "")), *([cmd] if cmd else []))
+    pid = r.stdout.strip()
+    if not pid:
+        die(f"could not start panel {pane['name']}: {r.stderr.strip()}")
+    tag(pid, f["name"], pane["name"])
+    tmux("set-option", "-p", "-t", pid, "@fh_hint", hint(f, pane["name"]))
+    return pid
+
+
+def paint_buttons(f: dict) -> None:
+    """tmux UI: the header's panel buttons, ■ open / □ closed, key letter underlined."""
+    pal = theme()
+    name = f["name"]
+    window = f"{SESSION}:{name}"
+    open_now = {r["pane"] for r in owned_panes(name) if r["session"] == SESSION}
+    parts = []
+    for pane in panels(f):
+        label, key = pane["name"], pane.get("key", "")
+        is_open = label in open_now
+        style = f"bg={pal['name']} fg=#000000 bold" if is_open else f"bg={pal['off']} fg=#eeeeee nobold"
+        text = label
+        if key and key in label:
+            i = label.index(key)
+            text = f"{label[:i]}#[underscore]{label[i]}#[nounderscore]{label[i + 1:]}"
+        parts.append(f"#[range=user|tog:{label[:11]}]#[{style}] {'■' if is_open else '□'} {text} #[norange bg={pal['band']} nobold] ")
+    parts.append("#[fg=#bcbcbc]^b P+key ")
+    tmux("set-option", "-w", "-t", window, "@fh_buttons", "".join(parts))
+    count = len([r for r in owned_panes(name) if r["session"] == SESSION])
+    tmux("set-option", "-w", "-t", window, "pane-border-status", "top" if count > 1 else "off")
+
+
+def bind_panel_keys(f: dict) -> None:
+    tmux("bind-key", "P", "switch-client", "-T", "fhpanel")
+    for pane in panels(f):
+        if pane.get("key"):
+            tmux("bind-key", "-T", "fhpanel", pane["key"], "run-shell", "-b",
+                 f"{FH} toggle '#{{window_name}}' {pane['name']}")
+
+
+def host_session(name: str, pane: str) -> str:
+    return "fh_" + re.sub(r"[^A-Za-z0-9_-]", "_", name) + "_" + pane
+
+
+def host(f: dict, servers: bool = True) -> list[dict]:
+    """App mode: every pane of the feature in its own detached tmux session (status off), which the
+    app attaches a terminal to. Idempotent; panes from the tmux UI are moved over, still running."""
+    name = f["name"]
+    out = []
+    rows = owned_panes(name)
+    for pane in layout(f):
+        sess = host_session(name, pane["name"])
+        cwd = str(Path(f["path"]) / pane.get("dir", ""))
+        if tmux("has-session", "-t", f"={sess}").returncode:
+            existing = next((r for r in rows if r["pane"] == pane["name"] and not r["session"].startswith("fh_")), None)
+            if existing:
+                tmux("new-session", "-d", "-s", sess, "-c", cwd, "sleep 2147483647")
+                tmux("move-pane", "-s", existing["id"], "-t", f"={sess}:")
+                tmux("kill-pane", "-a", "-t", existing["id"])
+            else:
+                cmd = pane_run(pane, f, servers)
+                r = tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", sess, "-c", cwd, *([cmd] if cmd else []))
+                if r.returncode:
+                    die(f"could not start {sess}: {r.stderr.strip()}")
+                pid = r.stdout.strip()
+                tag(pid, name, pane["name"])
+                tmux("set-option", "-p", "-t", pid, "@fh_hint", hint(f, pane["name"]))
+        tmux("set-option", "-t", f"={sess}:", "status", "off")
+        tmux("set-option", "-t", f"={sess}:", "@fh_app", "1")
+        if pane["name"] != "claude":
+            out.append({"pane": pane["name"], "session": sess, "hint": hint(f, pane["name"]), "key": pane.get("key", "")})
+        else:
+            out.insert(0, {"pane": "claude", "session": sess, "hint": "", "key": ""})
+    if has_window(name) and not [r for r in owned_panes(name) if r["session"] == SESSION]:
+        tmux("kill-window", "-t", f"{SESSION}:{name}")
+    return out
+
+
+def open_window(f: dict, servers: bool = True) -> None:
+    if ui_mode() == "app":
+        host(f, servers)
+        return
+    ensure_session()
+    name, wt = f["name"], f["path"]
+    if has_window(name):
+        return
+    claude = layout(f)[0]
+    r = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", SESSION, "-n", name, "-c", wt, pane_run(claude, f, servers))
+    claude_id = r.stdout.strip()
+    if not claude_id:
+        die(f"could not open window {name}: {r.stderr.strip()}")
+    tag(claude_id, name, "claude")
+    target = f"{SESSION}:{name}"
+    tmux("set-option", "-w", "-t", target, "@fh_feature", name)
+    tmux("set-option", "-w", "-t", target, "@fh_path", wt)
+    have = {x["pane"] for x in owned_panes(name)}
+    for pane in panels(f):
+        if pane["name"] not in have:
+            park_new(f, pane, servers)
+    bind_panel_keys(f)
+    paint_buttons(f)
+
+
+def toggle(f: dict, panel: str, focus: bool | None = None) -> None:
+    name = f["name"]
+    pane = next((x for x in panels(f) if x["name"] == panel), None)
+    if pane is None:
+        die(f"no panel '{panel}' (panels: {', '.join(x['name'] for x in panels(f))})")
+    rows = owned_panes(name)
+    mine = next((x for x in rows if x["pane"] == panel), None)
+    if mine is None:
+        park_new(f, pane, servers=True)
+        mine = next(x for x in owned_panes(name) if x["pane"] == panel)
+    if mine["session"] == SESSION:
+        ensure_park()
+        r = tmux("break-pane", "-d", "-a", "-s", mine["id"], "-t", f"{PARK}:", "-n", f"{name}_{panel}")
+        if r.returncode:
+            die(f"could not close {panel}: {r.stderr.strip()}")
+    else:
+        open_rows = [x for x in rows if x["session"] == SESSION and x["pane"] != "claude"]
+        claude = next((x for x in rows if x["session"] == SESSION and x["pane"] == "claude"), None)
+        target = open_rows[-1]["id"] if open_rows else (claude["id"] if claude else f"{SESSION}:{name}.0")
+        split = ["-v"] if open_rows else ["-h", "-l", "40%"]
+        should_focus = pane.get("focus", False) if focus is None else focus
+        tmux("join-pane", *([] if should_focus else ["-d"]), *split, "-s", mine["id"], "-t", target)
+    paint_buttons(f)
+
+
+def switch_to(name: str) -> None:
+    target = f"{SESSION}:{name}"
+    if os.environ.get("TMUX"):
+        if tmux("switch-client", "-t", target).returncode:
+            tmux("select-window", "-t", target)
+    else:
+        tmux("select-window", "-t", target)
+        if not sys.stdout.isatty():
+            print(f"{name} selected — run `fh attach` in a terminal to see it")
+            return
+        os.execvp("tmux", ["tmux", "attach", "-t", SESSION])
+
+
+# ---------- PRs ----------
+
+def ci_state(rollup: list) -> str:
+    states = [(c.get("conclusion") or c.get("state") or c.get("status") or "").upper() for c in rollup or []]
+    if not states:
+        return "none"
+    if any(s in ("FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE") for s in states):
+        return "fail"
+    if any(s in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "EXPECTED", "") for s in states):
+        return "running"
+    return "pass"
+
+
+def pr_sync(force: bool = False) -> dict:
+    cache = read_json(PRS, {})
+    if not force and time.time() - cache.get("fetchedAt", 0) < PR_TTL:
+        return cache
+    by_branch: dict = {}
+    wanted = {f.get("project") or default_project() for f in features()} if features() else set()
+    for name in wanted:
+        p = project(name)
+        if p.get("prs") is False:
+            continue
+        r = run(["gh", "pr", "list", "--author", "@me", "--state", "all", "--limit", "60", "--json",
+                 "number,headRefName,state,isDraft,url,statusCheckRollup,reviewDecision,updatedAt"], cwd=p["repo"])
+        if r.returncode:
+            continue
+        for pr in json.loads(r.stdout):
+            b = pr["headRefName"]
+            if b in by_branch and by_branch[b]["state"] == "OPEN":
+                continue  # keep the open PR over an older closed one
+            by_branch[b] = {"number": pr["number"], "state": pr["state"], "isDraft": pr["isDraft"],
+                            "url": pr["url"], "ci": ci_state(pr["statusCheckRollup"]), "project": name,
+                            "review": pr.get("reviewDecision") or "", "updatedAt": pr["updatedAt"]}
+    for f in features():
+        pr = by_branch.get(f["branch"])
+        if pr and pr["state"] == "OPEN":
+            pr["findings"] = len(new_findings(project_of(f), pr["number"], pr["updatedAt"]))
+    cache = {"fetchedAt": time.time(), "byBranch": by_branch}
+    write_json(PRS, cache)
+    return cache
+
+
+def pr_for(f: dict) -> dict | None:
+    return read_json(PRS, {}).get("byBranch", {}).get(f["branch"])
+
+
+def bot_comments(p: dict, number: int) -> list[dict]:
+    r = run(["gh", "api", f"repos/:owner/:repo/pulls/{number}/comments", "--paginate", "--jq", ".[]"], cwd=p["repo"])
+    rows = [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+    return [c for c in rows if any(b in (c.get("user") or {}).get("login", "").lower() for b in BOTS)
+            and not c.get("in_reply_to_id")]
+
+
+def new_findings(p: dict, number: int, updated_at: str, refresh: bool = False, mark: bool = False) -> list[dict]:
+    fb = read_json(FEEDBACK, {})
+    key = f"{p['name']}#{number}"
+    seen = fb.get(key, fb.get(str(number)))
+    if seen is not None and seen.get("updatedAt") == updated_at and not (refresh or mark):
+        return list(seen.get("pending", []))
+    comments = bot_comments(p, number)
+    handled = set(seen["handled"]) if seen else {c["id"] for c in comments}  # first sighting: record only
+    pending = [c for c in comments if c["id"] not in handled]
+    slim = [{"id": c["id"], "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
+             "url": c.get("html_url"), "body": c.get("body", "")[:600]} for c in pending]
+    if mark:
+        handled |= {c["id"] for c in pending}
+        slim = []
+    fb[key] = {"handled": sorted(handled), "pending": slim, "updatedAt": updated_at}
+    fb.pop(str(number), None)
+    write_json(FEEDBACK, fb)
+    return slim
+
+
+def severity(body: str) -> str:
+    if "🔴" in body or re.search(r"\bcritical\b", body, re.I):
+        return "critical"
+    if "🔵" in body:
+        return "suggestion"
+    return "important"
+
+
+# ---------- briefs ----------
+
+def service_urls(f: dict) -> str:
+    return ", ".join(f"{svc} http://localhost:{port}" for svc, port in ports(f).items())
+
+
+def write_brief(p: dict, f: dict, ticket: str | None, prompt: str | None) -> None:
+    head = []
+    if ticket:
+        head.append(f"# {ticket}\n\nFetch issue {ticket} with your tracker's tools (for Linear: get_issue, "
+                    "list_comments) and read its description and comments before you start.")
+    if prompt:
+        head.append(("" if ticket else "# Task\n\n") + prompt)
+    servers = ""
+    if ports(f):
+        servers = (f"Its services already run in panels beside you: {service_urls(f)}. Use exactly these ports "
+                   f"for curl and browser checks — never the project's defaults or another worktree's. "
+                   f"If a service is down, run `fh restart {f['name']}`.")
+    notes = f"\n{p['agentNotes']}" if p.get("agentNotes") else ""
+    body = f"""
+## How this run works
+You are working alone in worktree `{f['path']}` on branch `{f['branch']}`. {servers}{notes}
+
+## Finish like this
+- Keep to the task's scope. {p.get('checks') or DEFAULT_PROJECT['checks']}
+- Commit with a conventional message describing what the code does, push, and open a draft PR,
+  then invoke the `pr-watch-feedback` skill (if you have it) to see CI and review findings through.
+- End with a 3-line summary: what changed, what you verified, what you did not.
+"""
+    (BRIEFS / f"{f['name']}.md").write_text("\n\n".join(head) + "\n" + body)
+
+
+# ---------- commands ----------
+
+def cmd_new(args: list[str]) -> None:
+    prompt = base = title = parent = proj = None
+    rest = []
+    it = iter(args)
+    for a in it:
+        if a in ("-p", "--prompt"):
+            prompt = " ".join(it) or None  # the rest of the line, quoted or not
+        elif a == "--base":
+            base = next(it, None)
+        elif a == "--title":
+            title = next(it, None)
+        elif a == "--parent":
+            parent = next(it, None)
+        elif a == "--project":
+            proj = next(it, None)
+        else:
+            rest.append(a)
+    if not rest:
+        die("fh new <name|TICKET-123> [--project P] [--title T] [--parent NAME] [--base REF] [-p PROMPT]")
+    if parent and not proj and (REG / f"{parent}.json").exists():
+        proj = feature(parent).get("project")
+    p = project(proj or project_here() or default_project())
+    arg = rest[0]
+    ticket = arg.upper() if TICKET.match(arg) else None
+    name = arg.lower()
+    if not re.match(r"^[a-z0-9][a-z0-9._-]{0,40}$", name):
+        die("name must be lowercase letters, digits, . _ -")
+    if (REG / f"{name}.json").exists():
+        die(f"feature '{name}' exists")
+    repo = p["repo"]
+    if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
+        die(f"{repo} is not a git repository (project {p['name']})")
+    wt = p["worktrees"] / name
+    branch = p["branchPrefix"].replace("{user}", handle(p)) + name
+    run(["git", "-C", str(repo), "fetch", "-q", "--prune", "origin"])
+    if wt.exists():
+        if run(["git", "-C", str(wt), "rev-parse", "--git-dir"]).returncode:
+            die(f"{wt} exists and is not a worktree")
+        branch = run(["git", "-C", str(wt), "branch", "--show-current"]).stdout.strip()
+    elif run(["git", "-C", str(repo), "show-ref", "-q", "--verify", f"refs/heads/{branch}"]).returncode == 0:
+        run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt), branch], check=True)
+    else:
+        start = base or p["base"]
+        if run(["git", "-C", str(repo), "rev-parse", "-q", "--verify", start]).returncode:
+            start = "HEAD"  # a repo without that ref (no remote yet)
+        run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch, str(wt), start], check=True)
+    taken = listening() | {port for other in features() for port in ports(other).values()}
+    assigned = {}
+    for s in services(p):
+        assigned[s["name"]] = alloc(s, taken | set(assigned.values()))
+    f = {"name": name, "project": p["name"], "path": str(wt), "branch": branch, "ports": assigned,
+         "ticket": ticket, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    f["links"] = {s["name"]: fill(s["open"], f, assigned[s["name"]]) for s in services(p) if s.get("open")}
+    if p.get("agentNotes"):
+        f["agentNotes"] = p["agentNotes"]
+    if title:
+        f["title"] = title
+    if parent:
+        f["parent"] = parent
+    provision(p, f)
+    write_json(REG / f"{name}.json", f)
+    if ticket or prompt:
+        write_brief(p, f, ticket, prompt)
+    open_window(f)
+    write_json(HUB / "focus.json", {"name": name, "at": time.time()})  # the app switches to it
+    print(f"{name}: {wt} [{branch}]  {service_urls(f) or 'no services'}" + ("  (agent briefed)" if ticket or prompt else ""))
+
+
+def cmd_agent(name: str) -> None:
+    f = feature(name)
+    os.chdir(f["path"])
+    brief = BRIEFS / f"{name}.md"
+    if brief.exists():
+        text = brief.read_text()
+        brief.rename(brief.with_suffix(".sent.md"))
+        os.execvp("claude", ["claude", text])
+    transcripts = HOME / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", f["path"])
+    if any(transcripts.glob("*.jsonl")):
+        os.execvp("claude", ["claude", "--continue"])
+    os.execvp("claude", ["claude"])
+
+
+def cmd_serve(svc: str, name: str) -> None:
+    f = feature(name)
+    service = next((s for s in services(project_of(f)) if s["name"] == svc), None)
+    if service is None:
+        die(f"no service '{svc}' in project {f.get('project')}")
+    port = ports(f).get(svc)
+    if port:
+        stop_port(port)
+    os.chdir(Path(f["path"]) / service.get("dir", ""))
+    os.execvp("bash", ["bash", "-c", fill(service["run"], f, port)])
+
+
+def cmd_servers(name: str, up: bool) -> None:
+    f = feature(name)
+    ensure_session()
+    if ui_mode() == "app":
+        host(f)
+    elif not has_window(name):
+        open_window(f, servers=up)
+        print(f"{name}: window opened, services {'starting' if up else 'stopped'}")
+        return
+    if not up:
+        for port in ports(f).values():
+            stop_port(port)
+    for pane in layout(f):
+        if pane.get("service") and (pid := find_pane(name, pane["name"])):
+            tmux("respawn-pane", "-k", "-t", pid, "-c", str(Path(f["path"]) / pane.get("dir", "")), pane_run(pane, f, up))
+    print(f"{name}: services {'restarting' if up else 'stopped'}")
+
+
+def cmd_ls() -> None:
+    regs = features()
+    if not regs:
+        print("(no features — fh new <name|TICKET-123>)")
+        return
+    live = listening()
+    pr_sync()
+    print(f"{'FEATURE':<22} {'PROJECT':<12} {'SERVICES':<24} {'LABELS':<14} {'PR':<15} {'STATE':<8} WORK → NEXT")
+    for f in regs:
+        status = read_json(STATUS / f"{f['name']}.json", {})
+        work = " → ".join(x for x in (status.get("work"), status.get("next")) if x) or "-"
+        svcs = " ".join(f"{s}:{port}{'●' if port in live else '○'}" for s, port in ports(f).items()) or "-"
+        try:
+            labs = " ".join(f"{n}:{v}" for n, v in labels(project_of(f), f)) or "-"
+        except SystemExit:
+            labs = "?"
+        pr = pr_for(f)
+        prs = "-"
+        if pr:
+            mark = {"pass": "✓", "fail": "✗", "running": "⟳", "none": ""}[pr["ci"]]
+            prs = f"#{pr['number']} {pr['state'].lower()}{' ' + mark if pr['state'] == 'OPEN' else ''}"
+            if pr.get("findings"):
+                prs += f" 💬{pr['findings']}"
+        print(f"{f['name']:<22} {f.get('project', '?'):<12} {svcs:<24} {labs:<14} {prs:<15} "
+              f"{status.get('state', '-'):<8} {work[:60]}")
+
+
+def cmd_findings(name: str, brief: bool, mark: bool) -> None:
+    f = feature(name)
+    p = project_of(f)
+    pr = pr_for(f) or pr_sync(force=True).get("byBranch", {}).get(f["branch"])
+    if not pr:
+        die(f"{name}: no PR for {f['branch']}")
+    pending = new_findings(p, pr["number"], pr["updatedAt"], refresh=True)
+    if not pending:
+        print(f"{name}: no unanswered review-bot findings on #{pr['number']}")
+        return
+    if brief:
+        lines = [f"The review bots left {len(pending)} comment(s) on PR #{pr['number']} that nobody has answered yet."]
+        for i, c in enumerate(pending, 1):
+            title = c["body"].strip().splitlines()[0][:120] if c["body"].strip() else "(no text)"
+            lines += [f"{i}. [{severity(c['body'])}] {title}", f"   {c['path']}:{c['line']}   {c['url']}",
+                      "   " + c["body"].replace("\n", "\n   ")]
+        lines += ["For each one:",
+                  "- Read the code first. If the finding is wrong, say so in a reply and leave the code alone — a rebuttal is a valid outcome.",
+                  "- If it is right, fix it properly rather than to the letter of the suggested patch.",
+                  "- Reply on the thread saying what you did (`gh api repos/:owner/:repo/pulls/comments/<id>/replies -f body=...`).",
+                  "- Re-run the checks that cover what you touched, then commit and push.",
+                  "- Do not touch anything the comments did not raise."]
+        print("\n".join(lines))
+    else:
+        for c in pending:
+            print(f"[{severity(c['body'])}] {c['path']}:{c['line']}  {c['url']}")
+    if mark:
+        new_findings(p, pr["number"], pr["updatedAt"], mark=True)
+
+
+def merged_and_clean(f: dict) -> str | None:
+    pr = pr_for(f)
+    if not pr or pr["state"] != "MERGED":
+        return None
+    if run(["git", "-C", f["path"], "status", "--porcelain"]).stdout.strip():
+        return None
+    return f"#{pr['number']} merged"
+
+
+def cmd_done(name: str, remove: bool = False) -> None:
+    f = feature(name)
+    panes = layout(f) if f.get("project") or project_names() else []
+    for port in ports(f).values():
+        stop_port(port)
+    for path in (REG / f"{name}.json", STATUS / f"{name}.json", BRIEFS / f"{name}.md"):
+        path.unlink(missing_ok=True)
+    if remove:
+        repo = project_of(f)["repo"]
+        r = run(["git", "-C", str(repo), "worktree", "remove", f["path"]])
+        print(f"{name}: closed and worktree removed" if r.returncode == 0 else f"{name}: closed; {r.stderr.strip()}")
+    else:
+        print(f"{name}: closed. Worktree kept at {f['path']}")
+    for row in owned_panes(name):
+        if row["session"] == PARK:
+            tmux("kill-pane", "-t", row["id"])
+    for pane in panes:
+        tmux("kill-session", "-t", f"={host_session(name, pane['name'])}")
+    # last: run from inside this feature's own window, killing it ends this process too
+    tmux("kill-window", "-t", f"{SESSION}:{name}")
+
+
+def cmd_clean(yes: bool) -> None:
+    pr_sync(force=True)
+    done = [(f, why) for f in features() if (why := merged_and_clean(f))]
+    if not done:
+        print("nothing to clean: no feature has a merged PR and a clean tree")
+        return
+    for f, why in done:
+        if yes:
+            cmd_done(f["name"], remove=True)
+        else:
+            print(f"{f['name']:<26} {why}  — fh clean --yes removes it (branch kept)")
+
+
+def cmd_doctor() -> None:
+    problems = 0
+
+    def warn(msg: str) -> None:
+        nonlocal problems
+        problems += 1
+        print(f"  ✗ {msg}")
+
+    print("tools")
+    for tool, fix in (("tmux", "brew install tmux"), ("gh", "brew install gh"), ("claude", ""), ("git", "")):
+        if run(["which", tool]).returncode:
+            warn(f"{tool} missing {fix}")
+    for name in project_names():
+        p = project(name)
+        print(f"project {name}  ({p['repo']})")
+        if run(["git", "-C", str(p["repo"]), "rev-parse", "--git-dir"]).returncode:
+            warn("repo is not a git repository")
+        for rel in p["setup"].get("link", []) + p["setup"].get("clone", []) + p["setup"].get("copy", []):
+            if not (p["repo"] / rel).exists():
+                warn(f"{rel} is missing in the main checkout (setup cannot provide it)")
+    live = listening()
+    regs = features()
+    for f in regs:
+        wt = Path(f["path"])
+        print(f["name"])
+        if not wt.exists():
+            warn(f"worktree {wt} is gone — fh done {f['name']}")
+            continue
+        try:
+            p = project_of(f)
+        except SystemExit:
+            warn(f"its project '{f.get('project')}' is not registered")
+            continue
+        for rel in p["setup"].get("copy", []) + p["setup"].get("link", []):
+            if not (wt / rel).exists():
+                warn(f"{rel} missing")
+        for rel in p["setup"].get("clone", []):
+            if not (wt / rel).exists():
+                warn(f"{rel} missing")
+            elif (wt / rel).is_symlink():
+                warn(f"{rel} is a symlink, expected a copy: rm it and `cp -Rc` it from the main checkout")
+        for s in services(p):
+            port = ports(f).get(s["name"])
+            lo, hi = (s.get("ports") or [0, 65535])[:2]
+            if port is None:
+                warn(f"no port assigned for {s['name']}")
+            elif not lo <= port <= hi:
+                warn(f"{s['name']} port {port} is outside {lo}-{hi}")
+        for rule in p.get("env", []):
+            path = wt / rule["file"]
+            text = path.read_text() if path.exists() else ""
+            for key, svc in rule.get("port", {}).items():
+                port = ports(f).get(svc)
+                line = next((ln for ln in text.splitlines() if ln.startswith(f"{key}=")), "")
+                if port and line and f"localhost:{port}" not in line:
+                    warn(f"{rule['file']} {key} does not point at {svc} :{port}")
+            for key, value in rule.get("set", {}).items():
+                if f"{key}={fill(value, f)}" not in text:
+                    warn(f"{rule['file']} {key} is not {fill(value, f)}")
+        for (lab_name, value), rule in zip(labels(p, f), p.get("labels", [])):
+            if value in rule.get("warn", []) or value == "none" and rule.get("required"):
+                warn(f"{lab_name} is {value}")
+        mine = set(ports(f).values())
+        for other in regs:
+            if other is not f and set(ports(other).values()) & mine:
+                warn(f"shares a port with {other['name']}")
+        if (mine & live) and not owned_panes(f["name"]):
+            warn("its ports are served by something outside Grove")
+    print(f"\n{problems} problem(s)" if problems else "\nall good")
+
+
+def detect_services(repo: Path) -> list[dict]:
+    """A starter guess for `fh project add`: a JS dev server and/or a Python web app."""
+    found = []
+    for pkg in [repo / "package.json", *sorted(repo.glob("*/package.json"))][:6]:
+        scripts = read_json(pkg, {}).get("scripts", {})
+        if "dev" in scripts:
+            rel = "" if pkg.parent == repo else pkg.parent.name
+            name = "web" if not found else (rel or "web2")
+            found.append({"name": name, "dir": rel, "run": "exec npm run dev -- --port {port}",
+                          "ports": [3001, 3099], "reserved": [3000], "open": "http://localhost:{port}"})
+            break
+    for marker, cmd in (("manage.py", "exec python manage.py runserver {port}"),
+                        ("main.py", "exec python -m uvicorn main:app --reload --port {port}")):
+        for path in [repo / marker, *sorted(repo.glob(f"*/{marker}"))][:6]:
+            if path.exists():
+                rel = "" if path.parent == repo else path.parent.name
+                found.append({"name": "api", "dir": rel, "run": cmd, "ports": [8001, 8099], "reserved": [8000]})
+                break
+        if any(s["name"] == "api" for s in found):
+            break
+    return found
+
+
+def cmd_project(rest: list[str]) -> None:
+    sub = rest[0] if rest else "ls"
+    if sub == "ls":
+        default = read_json(CONFIG, {}).get("defaultProject")
+        for name in project_names():
+            p = project(name)
+            print(f"{'*' if name == default else ' '} {name:<16} {p['repo']}  services: "
+                  f"{', '.join(s['name'] for s in services(p)) or '-'}")
+        if not project_names():
+            print("(no projects — fh project add <repo>)")
+    elif sub == "add":
+        if len(rest) < 2:
+            die("project add <repo> [--name N]")
+        repo = expand(rest[1])
+        if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
+            die(f"{repo} is not a git repository")
+        name = rest[rest.index("--name") + 1] if "--name" in rest else repo.name.lower()
+        if (PROJECTS / f"{name}.json").exists():
+            die(f"project '{name}' exists (fh project show {name})")
+        mine = {"repo": str(repo).replace(str(HOME), "~")}
+        if not (repo / ".grove.json").exists():
+            mine["services"] = detect_services(repo)
+            mine["_help"] = ("Grove project config — see `fh` docs: services, setup, env, labels, checks, agentNotes. "
+                             "Commit a .grove.json to the repo to share it; keys here override it.")
+        write_json(PROJECTS / f"{name}.json", mine)
+        cfg = read_json(CONFIG, {})
+        if not cfg.get("defaultProject"):
+            cfg["defaultProject"] = name
+            write_json(CONFIG, cfg)
+        print(f"project {name}: {repo} ({'.grove.json' if (repo / '.grove.json').exists() else 'starter config'}) "
+              f"→ edit {PROJECTS / (name + '.json')}")
+    elif sub == "default":
+        if len(rest) < 2 or rest[1] not in project_names():
+            die(f"project default <name> (projects: {', '.join(project_names())})")
+        cfg = read_json(CONFIG, {})
+        cfg["defaultProject"] = rest[1]
+        write_json(CONFIG, cfg)
+        print(f"default project: {rest[1]}")
+    elif sub == "show":
+        p = project(rest[1] if len(rest) > 1 else default_project())
+        print(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in p.items()}, indent=2))
+    else:
+        die("project ls | add <repo> [--name N] | default <name> | show [name]")
+
+
+def cmd_statusline() -> None:
+    """Claude Code's status line: in the tmux UI the feature switcher; in the app nothing (the sidebar
+    is the switcher); outside features an optional legacy script."""
+    raw = sys.stdin.read()
+    data = parse_json(raw)
+    cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd") or os.getcwd()
+    regs = features()
+    here = next((f for f in regs if cwd == f["path"] or cwd.startswith(f["path"] + "/")), None)
+    legacy = HOME / ".claude/statusline-feature.sh"
+    if here is not None and ui_mode() == "app":
+        return
+    if here is None or not os.environ.get("TMUX"):
+        if legacy.exists():
+            os.execvp("bash", ["bash", "-c", f"printf '%s' {shlex.quote(raw)} | {shlex.quote(str(legacy))}"])
+        return
+    index = {}
+    for line in tmux("list-windows", "-t", SESSION, "-F", "#I\t#W").stdout.splitlines():
+        i, _, w = line.partition("\t")
+        index[w] = i
+    pal = theme()
+
+    def fg(hexcolour: str) -> str:
+        h = hexcolour.lstrip("#")
+        return "\033[38;2;{};{};{}m".format(*(int(h[i:i + 2], 16) for i in (0, 2, 4)))
+
+    def bg(hexcolour: str) -> str:
+        h = hexcolour.lstrip("#")
+        return "\033[48;2;{};{};{}m".format(*(int(h[i:i + 2], 16) for i in (0, 2, 4)))
+
+    look = {"waiting": ("❗", "needs you", pal["waiting"]), "ready": ("✓", "your turn", pal["ready"]),
+            "working": ("⏳", "working", pal["working"]), "offline": ("·", "offline", "#a8a8a8")}
+    parts = []
+    for f in regs:
+        st = read_json(STATUS / f"{f['name']}.json", {}).get("state", "offline")
+        glyph, word, colour = look.get(st, look["offline"])
+        num = index.get(f["name"], "?")
+        if f is here:
+            parts.append(f"{bg(pal['name'])}\033[1;30m ▶ {num} {f['name']} \033[0m")
+        else:
+            label = f" {word}" if st in ("waiting", "ready") else ""
+            parts.append(f"{fg(colour)}{num} {glyph} {f['name']}{label}\033[0m")
+    print("  ".join(parts) + f"   {fg('#a8a8a8')}^b n switch · ^b F pick · ^b N new\033[0m")
+
+
+def parse_json(text: str) -> dict:
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
+    except ValueError:
+        return {}
+
+
+def main(argv: list[str]) -> None:
+    cmd, rest = (argv[0], argv[1:]) if argv else ("ls", [])
+
+    def need(n: int, usage: str) -> None:
+        if len(rest) < n:
+            die(usage)
+
+    if cmd == "new":
+        cmd_new(rest)
+    elif cmd == "project":
+        cmd_project(rest)
+    elif cmd == "go":
+        need(1, "go <name>")
+        f = feature(rest[0])
+        open_window(f)
+        switch_to(f["name"])
+    elif cmd == "ls":
+        cmd_ls()
+    elif cmd == "agent":
+        need(1, "agent <name>")
+        cmd_agent(rest[0])
+    elif cmd == "serve":
+        need(2, "serve <service> <name>")
+        cmd_serve(rest[0], rest[1])
+    elif cmd in ("up", "restart"):
+        need(1, f"{cmd} <name>")
+        cmd_servers(rest[0], up=True)
+    elif cmd == "down":
+        need(1, "down <name>")
+        cmd_servers(rest[0], up=False)
+    elif cmd == "pr":
+        cache = pr_sync(force="--force" in rest)
+        print(f"{len(cache.get('byBranch', {}))} PRs cached")
+    elif cmd == "findings":
+        need(1, "findings <name> [--brief] [--mark]")
+        cmd_findings(rest[0], "--brief" in rest, "--mark" in rest)
+    elif cmd == "clean":
+        cmd_clean("--yes" in rest)
+    elif cmd == "done":
+        need(1, "done <name>")
+        cmd_done(rest[0])
+    elif cmd == "host":
+        need(1, "host <name>")
+        print(json.dumps(host(feature(rest[0]))))
+    elif cmd == "rename":
+        need(2, "rename <name> <title…>")
+        f = feature(rest[0])
+        f["title"] = " ".join(rest[1:]).strip() or f["name"]
+        write_json(REG / f"{f['name']}.json", f)
+        print(f"{f['name']}: titled “{f['title']}”")
+    elif cmd == "ui":
+        cfg = read_json(CONFIG, {})
+        if rest:
+            if rest[0] not in ("app", "tmux"):
+                die("ui app|tmux")
+            cfg["ui"] = rest[0]
+            write_json(CONFIG, cfg)
+        print(f"ui: {cfg.get('ui', 'tmux')}")
+    elif cmd == "theme":
+        t = read_json(THEME, DEFAULT_THEME) if THEME.exists() else DEFAULT_THEME
+        if not rest:
+            print(f"palette: {t.get('palette')}  (choices: {', '.join(t.get('palettes', {}))})")
+        elif rest[0] not in t.get("palettes", {}):
+            die(f"no palette '{rest[0]}' (choices: {', '.join(t.get('palettes', {}))})")
+        else:
+            write_json(THEME, {**t, "palette": rest[0]})
+            apply_theme()
+            for f in features():
+                if has_window(f["name"]):
+                    paint_buttons(f)
+            print(f"palette: {rest[0]} (headers repaint within a few seconds)")
+    elif cmd == "statusline":
+        cmd_statusline()
+    elif cmd == "toggle":
+        need(2, "toggle <name> <panel>")
+        toggle(feature(rest[0]), rest[1])
+    elif cmd == "relayout":
+        need(1, "relayout <name>")
+        f = feature(rest[0])
+        old = f"{SESSION}:{f['name']}"
+        for row in owned_panes(f["name"]):
+            if row["session"] == PARK:
+                tmux("kill-pane", "-t", row["id"])
+        tmux("rename-window", "-t", old, f"{f['name']}-old")
+        for row in owned_panes(f["name"]):
+            tmux("set-option", "-p", "-u", "-t", row["id"], "@fh_owner")
+        open_window(f)
+        tmux("kill-window", "-t", f"{SESSION}:{f['name']}-old")
+        print(f"{f['name']}: window rebuilt")
+    elif cmd == "doctor":
+        cmd_doctor()
+    elif cmd == "attach":
+        ensure_session()
+        os.execvp("tmux", ["tmux", "attach", "-t", SESSION])
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

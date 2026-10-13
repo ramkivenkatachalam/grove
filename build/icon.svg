@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Grove: worktrees growing from one root. macOS icon grid: 824px squircle centred on 1024. -->
+  <defs>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#46302a"/>
+      <stop offset="1" stop-color="#2a1d19"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="drop" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#drop)">
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#ground)"/>
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+  </g>
+
+  <!-- the branches: one root, three worktrees -->
+  <g fill="none" stroke="#f2d6c9" stroke-width="30" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 790 L512 440"/>
+    <path d="M512 680 C512 600 316 610 316 520 L316 490"/>
+    <path d="M512 640 C512 565 708 575 708 490 L708 455"/>
+  </g>
+  <circle cx="512" cy="790" r="30" fill="#f2d6c9"/>
+
+  <!-- canopies in the three state colours, each its own tree -->
+  <circle cx="316" cy="420" r="92" fill="#8fdcb4"/>
+  <circle cx="512" cy="330" r="112" fill="#d77757"/>
+  <circle cx="708" cy="385" r="92" fill="#e8957a"/>
+</svg>

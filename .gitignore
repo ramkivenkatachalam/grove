@@ -1,0 +1,8 @@
+node_modules/
+renderer/dist/
+out/
+build/grove.iconset/
+build/icon-1024.png
+mod/.claude-plugin/types/
+__pycache__/
+.DS_Store

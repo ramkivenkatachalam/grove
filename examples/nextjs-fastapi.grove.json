@@ -1,0 +1,27 @@
+{
+  "_help": "Example .grove.json for a repo with a Next.js frontend and a FastAPI backend. Commit it to the repo root; personal overrides go in ~/.claude/feature-hub/projects/<name>.json.",
+  "base": "origin/main",
+  "branchPrefix": "{user}/",
+  "setup": {
+    "link": ["api/.venv"],
+    "clone": ["web/node_modules"],
+    "copy": ["web/.env.local", "api/.env"],
+    "run": []
+  },
+  "services": [
+    { "name": "api", "dir": "api", "key": "a", "run": "exec .venv/bin/uvicorn main:app --reload --port {port}",
+      "ports": [8001, 8099], "reserved": [8000], "hint": "uvicorn · :{port}" },
+    { "name": "web", "dir": "web", "key": "w", "run": "exec npm run dev -- --port {port}",
+      "ports": [3001, 3099], "reserved": [3000], "hint": "next dev · :{port}", "open": "http://localhost:{port}" }
+  ],
+  "env": [
+    { "file": "web/.env.local", "port": { "NEXT_PUBLIC_API_URL": "api" } },
+    { "file": "api/.env", "set": { "CORS_ORIGINS": "http://localhost:{web}" } }
+  ],
+  "labels": [
+    { "name": "db", "file": "api/.env", "key": "DATABASE_URL",
+      "rules": [["localhost|127\\.0\\.0\\.1", "local"], ["staging", "staging"], ["prod", "PROD"]], "warn": ["PROD"] }
+  ],
+  "checks": "Run the checks that cover what you touched (pytest in api/; npm test and tsc in web/).",
+  "agentNotes": ""
+}
