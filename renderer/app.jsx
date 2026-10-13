@@ -275,6 +275,192 @@ function Header({ f, pal, panels, openList, onToggle, repo }) {
   )
 }
 
+// ---------- main panel tabs: Claude, and what you keep about the feature ----------
+const TABS = [
+  { id: 'claude', label: 'Claude' },
+  { id: 'summary', label: 'Summary' },
+  { id: 'notes', label: 'Notes' },
+  { id: 'retro', label: 'Retro' },
+]
+
+function TabBar({ tab, onTab }) {
+  const refs = useRef({})
+  const move = (e) => {
+    const i = TABS.findIndex((t) => t.id === tab)
+    const to = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: TABS.length - 1 }[e.key]
+    if (to === undefined) return
+    e.preventDefault()
+    const next = TABS[(to + TABS.length) % TABS.length].id
+    onTab(next)
+    refs.current[next]?.focus()
+  }
+  return (
+    <div className="tabs" role="tablist" aria-label="Main panel" onKeyDown={move}>
+      {TABS.map((t, i) => (
+        <button key={t.id} ref={(el) => { refs.current[t.id] = el }} type="button" role="tab" id={`tab-${t.id}`} aria-controls={`tabpanel-${t.id}`}
+          aria-selected={tab === t.id} tabIndex={tab === t.id ? 0 : -1} className="tab" title={`${t.label} (⌃${i + 1})`} onClick={() => onTab(t.id)}>
+          {t.label}<kbd>⌃{i + 1}</kbd>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// a hub document (notes, retro) for one feature: loads on switch, saves a beat after typing stops
+function useDoc(kind, name) {
+  const [text, setText] = useState('')
+  const [saved, setSaved] = useState('loading')
+  const pending = useRef(null)
+  useEffect(() => {
+    let live = true
+    setSaved('loading')
+    hub.doc.read(kind, name).then((t) => {
+      if (!live) return
+      setText(t)
+      setSaved('saved')
+    })
+    return () => {
+      live = false
+      if (pending.current) {
+        clearTimeout(pending.current.timer)
+        hub.doc.write(kind, name, pending.current.text)
+        pending.current = null
+      }
+    }
+  }, [kind, name])
+  const edit = (t) => {
+    setText(t)
+    setSaved('unsaved')
+    if (pending.current) clearTimeout(pending.current.timer)
+    const timer = setTimeout(async () => {
+      pending.current = null
+      setSaved((await hub.doc.write(kind, name, t)) ? 'saved' : 'error')
+    }, 600)
+    pending.current = { timer, text: t }
+  }
+  return [text, edit, saved]
+}
+
+const SAVED = { loading: 'Loading…', unsaved: 'Editing…', saved: 'Saved', error: 'Could not save' }
+
+function SaveState({ saved, file }) {
+  return <span className={`saved ${saved}`} role="status" title={file}>{SAVED[saved]}</span>
+}
+
+function NotesTab({ f }) {
+  const [text, edit, saved] = useDoc('notes', f.name)
+  return (
+    <div className="doc">
+      <div className="doc-bar">
+        <label htmlFor="notes-text">Notes on {f.title}</label>
+        <span className="grow" />
+        <SaveState saved={saved} file={`~/.claude/feature-hub/notes/${f.name}.md`} />
+      </div>
+      <textarea id="notes-text" className="doc-text" spellCheck value={text} disabled={saved === 'loading'}
+        placeholder="Decisions, links, things to remember about this feature. Markdown, saved as you type."
+        onChange={(e) => edit(e.target.value)} />
+    </div>
+  )
+}
+
+// a retro is markdown with one ## section per question, so it reads well outside Grove too
+const RETRO = [
+  { heading: 'What went well', hint: 'what worked: approach, tools, prompts worth repeating' },
+  { heading: 'What didn’t', hint: 'what slowed you or Claude down, what went wrong' },
+  { heading: 'What to try next time', hint: 'one or two changes to make on the next feature' },
+]
+
+function parseRetro(text) {
+  const sections = {}
+  let head = ''
+  for (const line of text.split('\n')) {
+    const m = /^## (.+?)\s*$/.exec(line)
+    if (m) {
+      head = m[1]
+      sections[head] = []
+    } else {
+      ;(sections[head] ||= []).push(line)
+    }
+  }
+  return Object.fromEntries(Object.entries(sections).map(([h, lines]) => [h, lines.join('\n').trim()]))
+}
+
+function writeRetro(title, sections) {
+  const known = RETRO.map((q) => q.heading)
+  const extra = Object.keys(sections).filter((h) => h && !known.includes(h)) // sections added by hand stay
+  return [`# Retro: ${title}`, ...[...known, ...extra].map((h) => `## ${h}\n\n${sections[h] || ''}`)].join('\n\n').trimEnd() + '\n'
+}
+
+function RetroTab({ f }) {
+  const [text, edit, saved] = useDoc('retro', f.name)
+  const sections = useMemo(() => parseRetro(text), [text])
+  return (
+    <div className="doc retro">
+      <div className="doc-bar">
+        <span className="doc-title">Retro on {f.title}</span>
+        <span className="grow" />
+        <SaveState saved={saved} file={`~/.claude/feature-hub/retros/${f.name}.md`} />
+      </div>
+      {RETRO.map((q, i) => (
+        <div key={q.heading} className="retro-q">
+          <label htmlFor={`retro-${i}`}>{q.heading}</label>
+          <textarea id={`retro-${i}`} className="doc-text" value={sections[q.heading] || ''} placeholder={q.hint} disabled={saved === 'loading'}
+            onChange={(e) => edit(writeRetro(f.title, { ...sections, [q.heading]: e.target.value }))} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// the task section of a brief (everything else in it is Grove's standing instructions)
+const taskOf = (brief) => {
+  const m = /^# Task\s*\n([\s\S]*?)(?=^#{1,2} |$(?![\s\S]))/m.exec(brief)
+  return (m ? m[1] : brief).trim()
+}
+
+function SummaryTab({ f, repo, pal }) {
+  const [brief, setBrief] = useState('')
+  useEffect(() => {
+    let live = true
+    hub.brief(f.name).then((b) => live && setBrief(b))
+    return () => { live = false }
+  }, [f.name])
+  const st = f.status.state || 'offline'
+  const d = f.status.details || {}
+  const git = d.git || {}
+  const pr = f.pr
+  const ci = pr && pr.state === 'OPEN' ? CI[pr.ci] || CI.none : null
+  const stage = d.stage?.index ?? 0
+  const ports = Object.entries(portsOf(f))
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+  const gitWords = [git.dirty && `${plural(git.dirty, 'file')} changed`, git.ahead && `${plural(git.ahead, 'commit')} ahead`, git.behind && `${plural(git.behind, 'commit')} behind`].filter(Boolean)
+  const link = (url, label) => <a role="link" tabIndex={0} onClick={() => hub.open(url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(url)}>{label}</a>
+  const rows = [
+    ['State', `${STATE[st].glyph} ${STATE[st].word}${d.note || f.status.message ? ` — ${d.note || f.status.message}` : ''}`],
+    ['Working on', f.status.work ? `${f.status.work}${f.status.now ? ` — ${f.status.now}` : ''}` : 'No recap yet — it appears after Claude’s first turn'],
+    ['Next', d.nextStep || f.status.next || 'give Claude its next instruction'],
+    f.kind !== 'session' && ['Stage', `${STAGES[stage]} (${stage + 1} of 8)${d.stage?.note ? ` — ${d.stage.note}` : ''}`],
+    ['Branch', f.branch || '?'],
+    ['Where', f.kind === 'session' ? placeOf(f.path, repo) : (f.path || '').replace(/^\/Users\/[^/]+/, '~')],
+    f.ticket && ['Ticket', f.ticket],
+    f.parent && ['Spun off from', f.parent],
+    ['Git', gitWords.length ? gitWords.join(', ') : 'clean, up to date'],
+    ['Pull request', pr ? <>{link(pr.url, `#${pr.number}`)} · {pr.state.toLowerCase()}{ci && <> · <span style={{ color: ci[0] === 'ready' ? pal.ready : ci[0] }}>{ci[1]}</span></>}{pr.findings > 0 && ` · ${plural(pr.findings, 'review finding')}`}</> : 'none yet'],
+    ports.length > 0 && ['Services', <>{ports.map(([svc, port], i) => <span key={svc}>{i > 0 && ' · '}{f.links?.[svc] ? link(f.links[svc], `${svc} :${port}`) : `${svc} :${port}`}</span>)}</>],
+    f.createdAt && ['Started', new Date(f.createdAt).toLocaleString()],
+  ].filter(Boolean)
+  const task = taskOf(brief)
+  return (
+    <div className="doc summary">
+      <dl className="facts-list">
+        {rows.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}
+      </dl>
+      <h2>Task</h2>
+      {task ? <pre className="task">{task}</pre> : <p className="busy">No task was given when this feature was created.</p>}
+    </div>
+  )
+}
+
 // ---------- app ----------
 function App() {
   const [state, setState] = useState({ features: [], palette: {} })
@@ -284,6 +470,9 @@ function App() {
     try { return JSON.parse(localStorage.getItem('open') || '{}') } catch { return {} }
   })
   const [zoom, setZoom] = useState(null)
+  const [tabs, setTabs] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('tabs') || '{}') } catch { return {} }
+  }) // feature -> main panel tab
   const [renaming, setRenaming] = useState(null)
   const [newOpen, setNewOpen] = useState(false)
   const [creating, setCreating] = useState(null)
@@ -312,6 +501,9 @@ function App() {
   }, [f?.name])
   useEffect(() => { if (current) localStorage.setItem(`current:${hub.project}`, current) }, [current])
   useEffect(() => { localStorage.setItem('open', JSON.stringify(openPanels)) }, [openPanels])
+  useEffect(() => { localStorage.setItem('tabs', JSON.stringify(tabs)) }, [tabs])
+  const tab = (f && tabs[f.name]) || 'claude'
+  const setTab = useCallback((t) => f && setTabs((all) => ({ ...all, [f.name]: t })), [f?.name])
 
   const say = (text, isError = false) => {
     setToast({ text, isError })
@@ -371,7 +563,7 @@ function App() {
 
   // menu accelerators and ⌘1…9
   const latest = useRef({})
-  latest.current = { f, features, toggle, open, zoom, sessionsNow: f ? hosted[f.name] : null }
+  latest.current = { f, features, toggle, open, zoom, setTab, sessionsNow: f ? hosted[f.name] : null }
   useEffect(() => {
     hub.onMenu(async (action) => {
       const { f, toggle, open, zoom } = latest.current
@@ -393,6 +585,16 @@ function App() {
         if (f && panel) {
           e.preventDefault()
           latest.current.toggle(panel.pane)
+        }
+        return
+      }
+      // ⌃1…4: main panel tabs (taken before the terminal sees them)
+      if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && /^Digit[1-9]$/.test(e.code)) {
+        const t = TABS[Number(e.code.slice(5)) - 1]
+        if (t && latest.current.f) {
+          e.preventDefault()
+          e.stopPropagation()
+          latest.current.setTab(t.id)
         }
         return
       }
@@ -443,10 +645,21 @@ function App() {
           <>
             <Header repo={state.repo || ''} f={f} pal={pal} panels={sessions ? Object.values(sessions).filter((s) => s.pane !== 'claude').map((s) => ({ name: s.pane, key: s.key })) : []} openList={open} onToggle={toggle} />
             <div className="work">
-              <section className="claude" aria-label="Claude session">
-                {sessions?.claude ? <TerminalView termKey={`${f.name}:claude`} session={sessions.claude.session} focus={!zoom} />
-                  : <div className="empty"><p className="busy">Starting {f.title}…</p></div>}
-              </section>
+              <div className="left">
+                <TabBar tab={tab} onTab={setTab} />
+                {/* the terminal stays mounted under the other tabs so it keeps its tmux attachment */}
+                <section className="claude" id="tabpanel-claude" role="tabpanel" aria-labelledby="tab-claude" hidden={tab !== 'claude'}>
+                  {sessions?.claude ? <TerminalView termKey={`${f.name}:claude`} session={sessions.claude.session} focus={!zoom && tab === 'claude'} />
+                    : <div className="empty"><p className="busy">Starting {f.title}…</p></div>}
+                </section>
+                {tab !== 'claude' && (
+                  <section className="tabpanel" id={`tabpanel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
+                    {tab === 'summary' && <SummaryTab f={f} repo={state.repo || ''} pal={pal} />}
+                    {tab === 'notes' && <NotesTab key={f.name} f={f} />}
+                    {tab === 'retro' && <RetroTab key={f.name} f={f} />}
+                  </section>
+                )}
+              </div>
               {open.length > 0 && sessions && (
                 <div className="panels">
                   {open.map((p) => sessions[p] && (

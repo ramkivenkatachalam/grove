@@ -14,6 +14,11 @@ contextBridge.exposeInMainWorld('hub', {
   openProject: (name) => ipcRenderer.send('open-project', name),
   addProject: () => ipcRenderer.invoke('add-project'),
   confirm: (message, detail) => ipcRenderer.invoke('confirm', message, detail),
+  doc: {
+    read: (kind, name) => ipcRenderer.invoke('doc:read', kind, name),
+    write: (kind, name, text) => ipcRenderer.invoke('doc:write', kind, name, text),
+  },
+  brief: (name) => ipcRenderer.invoke('brief', name),
   term: {
     open: (opts) => ipcRenderer.invoke('term:open', opts),
     write: (id, data) => ipcRenderer.send('term:write', id, data),

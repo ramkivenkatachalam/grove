@@ -102,3 +102,33 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .toast { position: fixed; bottom: 16px; right: 16px; max-width: 520px; background: #2a2a2a; border: 1px solid #444444; border-radius: 8px; padding: 10px 14px; white-space: pre-wrap; font: 12px var(--mono); z-index: 50; }
 .toast.error { border-color: #ff8f8f; }
 .busy { color: var(--text-3); font-style: italic; }
+
+/* ---- main panel tabs ---- */
+.left { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.left > [hidden] { display: none; }
+.tabs { display: flex; gap: 2px; padding: 6px 12px 0 12px; border-bottom: 1px solid #333333; }
+.tab { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-2); padding: 4px 10px 5px; cursor: pointer; font: 12px var(--ui); }
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: #ffffff; font-weight: 600; border-bottom-color: var(--name); }
+.tab kbd { font: 10px var(--mono); color: var(--text-3); margin-left: 6px; }
+.tabpanel { flex: 1; min-height: 0; overflow-y: auto; }
+.doc { display: flex; flex-direction: column; gap: 10px; padding: 14px 18px; min-height: 100%; max-width: 900px; }
+.doc-bar { display: flex; align-items: center; gap: 10px; }
+.doc-bar label, .doc-title, .retro-q label { color: var(--accent); font-weight: 600; font-size: 13px; }
+.doc .grow { flex: 1; }
+.saved { font: 11px var(--mono); color: var(--text-3); }
+.saved.saved { color: var(--text-2); }
+.saved.error { color: #ff8f8f; }
+.doc-text { flex: 1; min-height: 120px; resize: vertical; background: #141414; color: var(--text); border: 1px solid #333333; border-radius: 6px; padding: 10px 12px; font: 13px/1.5 var(--mono); }
+.doc-text:focus-visible { outline: 2px solid #ffffff; outline-offset: 1px; border-color: var(--name); }
+.doc-text::placeholder { color: var(--text-3); }
+.retro-q { display: flex; flex-direction: column; gap: 6px; }
+.retro-q .doc-text { min-height: 90px; flex: none; height: 120px; }
+.facts-list { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; }
+.facts-list > div { display: contents; }
+.facts-list dt { color: var(--text-3); font-size: 12px; }
+.facts-list dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.facts-list a { color: var(--name); text-decoration: none; cursor: pointer; }
+.facts-list a:hover { text-decoration: underline; }
+.summary h2 { font-size: 13px; color: var(--accent); margin: 10px 0 0; }
+.task { margin: 0; white-space: pre-wrap; font: 12px/1.5 var(--mono); color: var(--text-2); background: #141414; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; }

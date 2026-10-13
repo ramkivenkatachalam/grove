@@ -242,6 +242,35 @@ ipcMain.handle('host', async (_e, name) => {
     return { error: (result.stderr || result.stdout).trim() }
   }
 })
+// a feature's notes and retro: markdown in the hub, kept out of the worktree (and so out of git)
+const DOCS = { notes: 'notes', retro: 'retros' }
+const docFile = (kind, name) => DOCS[kind] && /^[\w.-]+$/.test(name) && !name.startsWith('.') ? path.join(HUB, DOCS[kind], name + '.md') : null
+ipcMain.handle('doc:read', (_e, kind, name) => {
+  const file = docFile(kind, name)
+  try {
+    return file ? fs.readFileSync(file, 'utf8') : ''
+  } catch {
+    return ''
+  }
+})
+ipcMain.handle('doc:write', (_e, kind, name, text) => {
+  const file = docFile(kind, name)
+  if (!file) return false
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file + '.tmp', text)
+  fs.renameSync(file + '.tmp', file)
+  return true
+})
+// the task a feature was started with (fh new -p / a ticket), before or after Claude was handed it
+ipcMain.handle('brief', (_e, name) => {
+  if (!/^[\w.-]+$/.test(name)) return ''
+  for (const file of [name + '.md', name + '.sent.md']) {
+    try {
+      return fs.readFileSync(path.join(HUB, 'briefs', file), 'utf8')
+    } catch {}
+  }
+  return ''
+})
 ipcMain.on('open', (_e, url) => {
   if (/^https?:\/\//.test(url)) shell.openExternal(url)
 })
