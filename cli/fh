@@ -17,6 +17,8 @@ per feature, for any project described by a project config (see `fh project`).
   fh clean [--yes]       list (or remove) features whose PR merged and whose tree is clean
   fh done <name>         stop everything and unregister; the worktree is kept
   fh doctor              check projects and features: files, deps, ports, env, labels
+  fh keepawake [--status|off|on]   keep the Mac awake while any agent is working (Claude
+                         sessions start it; it lets go once none are)
 
   fh project ls                       projects and which one is the default
   fh project add <repo> [--name N]    register a repo (reads its .grove.json, or writes a starter)
@@ -44,6 +46,8 @@ HOME = Path.home()
 HUB = Path(os.environ.get("GROVE_HUB", HOME / ".grove"))
 REG, STATUS, BRIEFS, PROJECTS = HUB / "features", HUB / "status", HUB / "briefs", HUB / "projects"
 PRS, FEEDBACK, CONFIG, THEME = HUB / "prs.json", HUB / "feedback.json", HUB / "config.json", HUB / "theme.json"
+AWAKE = HUB / "keepawake.pid"
+AWAKE_POLL = 30
 FH = os.environ.get("GROVE_BIN", str(HUB / "bin/fh"))
 SESSION = "features"
 PARK = "fh-park"  # tmux UI: a detached session where closed panels keep running
@@ -926,6 +930,81 @@ def claude_running_in(path: str) -> list[str]:
     return found
 
 
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+
+
+def awake_pid() -> int | None:
+    """The running keep-awake watcher, if there is one."""
+    try:
+        pid = int(AWAKE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid_alive(pid) else None
+
+
+def agents_working() -> list[str]:
+    """Features whose session says it is working and whose Claude is still running (a state left
+    behind by a crash or a reboot does not count)."""
+    return [f["name"] for f in features()
+            if read_json(STATUS / f"{f['name']}.json", {}).get("state") == "working"
+            and claude_running_in(f["path"])]
+
+
+def keepawake_loop() -> None:
+    """Hold a `caffeinate` while any agent works; exit once none do. It dies with this process (-w)."""
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    AWAKE.write_text(str(os.getpid()))
+    hold = None
+    try:
+        while True:
+            if read_json(CONFIG, {}).get("keepAwake", True) and agents_working():
+                if hold is None or hold.poll() is not None:
+                    # -i: no idle sleep; -s: no system sleep while on power; -m: disks stay up
+                    hold = subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
+                time.sleep(AWAKE_POLL)
+                continue
+            # let go, then look once more: a session may have started work as the pid file went
+            AWAKE.unlink(missing_ok=True)
+            if read_json(CONFIG, {}).get("keepAwake", True) and agents_working():
+                AWAKE.write_text(str(os.getpid()))
+                continue
+            return
+    finally:
+        if hold is not None and hold.poll() is None:
+            hold.terminate()
+        if awake_pid() in (None, os.getpid()):
+            AWAKE.unlink(missing_ok=True)
+
+
+def cmd_keepawake(args: list[str]) -> None:
+    cfg = read_json(CONFIG, {})
+    if args[:1] in (["on"], ["off"]):
+        cfg["keepAwake"] = args[0] == "on"
+        write_json(CONFIG, cfg)
+    if "--run" in args:
+        keepawake_loop()
+        return
+    on = cfg.get("keepAwake", True)
+    pid = awake_pid()
+    if on and pid is None and "--status" not in args and sys.platform == "darwin" and agents_working():
+        pid = subprocess.Popen([sys.executable, os.path.abspath(__file__), "keepawake", "--run"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               start_new_session=True).pid
+    if pid is not None and not on:
+        os.kill(pid, signal.SIGTERM)
+        pid = None
+    working = agents_working()
+    state = "off" if not on else f"holding the Mac awake for {', '.join(working)}" if pid and working else "idle"
+    print(f"keepawake: {state}")
+
+
 def cmd_agent(name: str) -> None:
     f = feature(name)
     os.chdir(f["path"])
@@ -1388,6 +1467,8 @@ def main(argv: list[str]) -> None:
         print(f"{f['name']}: window rebuilt")
     elif cmd == "doctor":
         cmd_doctor()
+    elif cmd == "keepawake":
+        cmd_keepawake(rest)
     elif cmd == "attach":
         ensure_session()
         os.execvp("tmux", ["tmux", "attach", "-t", SESSION])

@@ -443,6 +443,10 @@ async function setState($: EngineInterface, state: FeatureState, message = '') {
     const flag = NEEDS_YOU.includes(state) ? ICON[state] : ''
     await run($, ['tmux', 'set-option', '-w', '-t', pane, '@fh_attn', flag])
   }
+  if (state === 'working') {
+    // keep the Mac awake while any agent works; the watcher lets go once none do
+    await run($, [fh, 'keepawake'])
+  }
   if (state === 'waiting') {
     // a desktop notification, unless you are looking at this window
     const seen = pane === undefined

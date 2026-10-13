@@ -178,3 +178,15 @@ test('a main-checkout session is matched by its id, not its folder', async ($, o
   expect(fake.files.has(`${HUB}/status/s-sess1.json`)).toBe(true) // this conversation (session.id is sess-1)
   expect(fake.files.has(`${HUB}/status/s-other.json`)).toBe(false) // same folder, another conversation
 })
+
+test('a working session asks fh to keep the Mac awake', async ($, on) => {
+  const fake = host(on)
+  on('turn.start', ($, e) => e)
+
+  await $.session.start({ cwd: WT, surface: null, isInteractive: true })
+  expect(fake.commands).not.toContainEqual([`${HUB}/bin/fh`, 'keepawake'])
+
+  await $.turn.start({ turnId: 't1' } as never)
+  expect(fake.status().state).toBe('working')
+  expect(fake.commands).toContainEqual([`${HUB}/bin/fh`, 'keepawake'])
+})

@@ -102,6 +102,7 @@ to start a second Claude on a worktree that already has one.
 | `grove doctor` | Check projects and features: files, deps, ports, env, labels |
 | `grove project add\|ls\|default\|show` | Manage projects |
 | `grove pr` · `grove findings <name>` | Refresh PR/CI · list unanswered review-bot findings |
+| `grove keepawake [on\|off\|--status]` | Keeps the Mac awake while any agent is working (sessions start it; it lets go when all are idle). `off` turns it off |
 | `grove theme [palette]` · `grove ui app\|tmux` | Header palette · which front end new features open in |
 
 ## Install
