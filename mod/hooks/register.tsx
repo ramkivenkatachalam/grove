@@ -29,6 +29,8 @@ type Registered = {
   ticket?: string | null
   project?: string
   agentNotes?: string
+  kind?: 'session' // a conversation in the main checkout, matched by its id, not its folder
+  session?: string
 }
 
 // a feature's services and their ports, e.g. { be: 5006, fe: 3001 }
@@ -460,7 +462,10 @@ export const register: Register = on => {
     hub = `${home}/.claude/feature-hub`
     fh = `${hub}/bin/fh`
     const registry = await readRegistry($)
-    me = registry.find(one => e.cwd === one.path || e.cwd.startsWith(`${one.path}/`))
+    const sid = await $.session.id()
+    me = registry.find(one => one.kind === 'session'
+      ? one.session === sid
+      : e.cwd === one.path || e.cwd.startsWith(`${one.path}/`))
     pane = await $.env.get('TMUX_PANE')
     if (me !== undefined) {
       const previous = await $.fs.read(`${hub}/status/${me.name}.json`).then(parse<Status>, () => undefined)

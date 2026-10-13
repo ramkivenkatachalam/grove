@@ -161,7 +161,8 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
         {creating && (
           <li><div className="row"><span className="glyph">⏳</span><span className="text"><div className="title busy">Creating {creating}…</div><div className="sub">worktree · ports · servers</div></span></div></li>
         )}
-        {shown.map((f, i) => {
+        {[...shown.filter((x) => x.kind !== 'session'), ...shown.filter((x) => x.kind === 'session')].map((f, i, all) => {
+          const heading = f.kind === 'session' && (i === 0 || all[i - 1].kind !== 'session')
           const st = f.status.state || 'offline'
           const pr = f.pr
           const prBit = pr ? ` · #${pr.number}${pr.state === 'OPEN' ? ({ pass: ' ✓', fail: ' ✗', running: ' ⟳', none: '' })[pr.ci] : pr.state === 'MERGED' ? ' merged' : ''}` : ''
@@ -178,8 +179,12 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
               </li>
             )
           }
+          const where = f.kind === 'session'
+            ? `◷ ${f.path === repo ? 'main checkout' : f.path.slice(repo.length + 1)} · ⎇ ${f.branch || '?'}`
+            : null
           return (
             <li key={f.name}>
+              {heading && <div className="group" role="presentation">Sessions in the main checkout</div>}
               <button type="button" className={`row ${f.name === current ? 'current' : ''} ${st}`} aria-current={f.name === current ? 'page' : undefined}
                 title={`${f.title} — ${STATE[st].word}${f.status.message ? `: ${f.status.message}` : ''}`}
                 onClick={() => onPick(f.name)} onDoubleClick={() => setRenaming(f.name)}
@@ -187,7 +192,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
                 <span className="glyph" style={{ color: `var(--${st === 'offline' ? 'text-3' : st})` }} aria-label={STATE[st].word}>{STATE[st].glyph}</span>
                 <span className="text">
                   <div className="title">{f.title}</div>
-                  <div className="sub">{f.parent ? `↳ ${f.parent} · ` : ''}⎇ {f.branch.replace(/^[^/]+\//, '')}{prBit}</div>
+                  <div className="sub">{where || `${f.parent ? `↳ ${f.parent} · ` : ''}⎇ ${f.branch.replace(/^[^/]+\//, '')}${prBit}`}</div>
                 </span>
                 {i < 9 && <span className="num" aria-hidden="true">⌘{i + 1}</span>}
               </button>

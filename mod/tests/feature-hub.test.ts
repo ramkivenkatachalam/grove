@@ -40,6 +40,7 @@ function host(on: On, env: Record<string, string> = {}) {
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__feature-hub__${e.name}` } }))
   on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   const submitted: string[] = []
   on('prompt.submit', ($, e) => {
@@ -164,4 +165,16 @@ test('Claude can spin off a related feature with a handover', async ($, on) => {
   expect(prompt).toContain('Context handed over from feature flux')
   expect(prompt).toContain('totals.py')
   expect(JSON.stringify(made)).toContain('ran new csv-export')
+})
+
+test('a main-checkout session is matched by its id, not its folder', async ($, on) => {
+  const fake = host(on)
+  const repo = '/home/me/code/acme'
+  fake.files.set(`${HUB}/features/s-sess1.json`, JSON.stringify({ name: 's-sess1', kind: 'session', session: 'sess-1', project: 'acme', path: repo, branch: 'main', ports: {} }))
+  fake.files.set(`${HUB}/features/s-other.json`, JSON.stringify({ name: 's-other', kind: 'session', session: 'sess-2', project: 'acme', path: repo, branch: 'main', ports: {} }))
+
+  await $.session.start({ cwd: repo, surface: null, isInteractive: true })
+
+  expect(fake.files.has(`${HUB}/status/s-sess1.json`)).toBe(true) // this conversation (session.id is sess-1)
+  expect(fake.files.has(`${HUB}/status/s-other.json`)).toBe(false) // same folder, another conversation
 })

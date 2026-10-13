@@ -6,6 +6,8 @@ per feature, for any project described by a project config (see `fh project`).
                          worktree on <you>/<name>, its own ports, env rewritten, deps prepared,
                          servers up, Claude briefed (ticket / prompt)
   fh adopt <worktree>…   register existing worktrees as features (services start stopped)
+  fh sessions [--hours H]          recent Claude conversations in the main checkout, not yet in Grove
+  fh adopt --session <id>…         bring those conversations into Grove (they resume there)
   fh ls                  features, ports, servers, labels, PR/CI, session state
   fh go <name>           (tmux UI) switch to the feature's window
   fh up|down|restart <name>   start / stop / restart the feature's services
@@ -301,9 +303,11 @@ def labels(p: dict, f: dict) -> list[tuple[str, str]]:
 # ---------- panes: claude, shell, every service, extra panels ----------
 
 def layout(f: dict) -> list[dict]:
-    p = project_of(f)
     panes = [{"name": "claude", "run": "{fh} agent {name}", "dir": ""},
              {"name": "shell", "key": "s", "run": "", "dir": "", "focus": True}]
+    if f.get("kind") == "session":
+        return panes
+    p = project_of(f)
     for s in services(p):
         panes.append({"name": s["name"], "key": s.get("key", ""), "run": "{fh} serve " + s["name"] + " {name}",
                       "dir": s.get("dir", ""), "service": True})
@@ -619,6 +623,8 @@ def pr_sync(force: bool = False) -> dict:
 
 
 def pr_for(f: dict) -> dict | None:
+    if f.get("kind") == "session":
+        return None
     return read_json(PRS, {}).get("byBranch", {}).get(f["branch"])
 
 
@@ -761,7 +767,14 @@ def cmd_new(args: list[str]) -> None:
 
 def cmd_adopt(args: list[str]) -> None:
     """Register an existing worktree as a feature: nothing new is created; it gets its own ports, its
-    env rewritten, and sessions with services stopped (start them with fh up)."""
+    env rewritten, and sessions with services stopped (start them with fh up). With --session <id>,
+    bring in a Claude conversation from the main checkout instead."""
+    if "--session" in args:
+        i = args.index("--session")
+        title = args[args.index("--title") + 1] if "--title" in args else None
+        for sid in [a for a in args[i + 1:] if re.match(r"^[0-9a-f-]{36}$", a)]:
+            adopt_session(sid, title)
+        return
     title = proj = name = None
     paths = []
     it = iter(args)
@@ -815,6 +828,85 @@ def cmd_adopt(args: list[str]) -> None:
         print(f"{fname}: adopted {wt} [{branch}] “{f['title']}”  {service_urls(f)} (services stopped: fh up {fname})")
 
 
+TRANSCRIPTS = HOME / ".claude/projects"
+
+
+def mangle(path: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def transcript_info(path: Path) -> dict:
+    """id, folder, branch and title of a Claude Code transcript (its first cwd, its last aiTitle)."""
+    info = {"id": path.stem, "cwd": "", "branch": "", "title": "", "mtime": path.stat().st_mtime}
+    try:
+        with path.open() as fh_:
+            for line in fh_:
+                if not info["cwd"] and '"cwd":"' in line:
+                    info["cwd"] = re.search(r'"cwd":"([^"]*)"', line).group(1)
+                    m = re.search(r'"gitBranch":"([^"]*)"', line)
+                    info["branch"] = m.group(1) if m else ""
+                if '"aiTitle":"' in line:
+                    info["title"] = re.search(r'"aiTitle":"([^"]*)"', line).group(1)
+    except OSError:
+        pass
+    return info
+
+
+def recent_sessions(p: dict, hours: float) -> list[dict]:
+    """Claude conversations in the project's main checkout (or below it) touched in the last `hours`,
+    leaving out feature worktrees and sessions already in Grove."""
+    repo = str(p["repo"])
+    taken = {f.get("session") for f in features()}
+    worktrees = [f["path"] for f in features() if f.get("kind") != "session"]
+    cutoff = time.time() - hours * 3600
+    found = []
+    for folder in TRANSCRIPTS.glob(mangle(repo) + "*"):
+        for t in folder.glob("*.jsonl"):
+            if t.stat().st_mtime < cutoff or t.stem in taken:
+                continue
+            info = transcript_info(t)
+            cwd = info["cwd"]
+            if not (cwd == repo or cwd.startswith(repo + "/")) or any(cwd == w or cwd.startswith(w + "/") for w in worktrees):
+                continue
+            found.append(info)
+    return sorted(found, key=lambda i: -i["mtime"])
+
+
+def adopt_session(sid: str, title: str | None) -> None:
+    path = next(TRANSCRIPTS.glob(f"*/{sid}.jsonl"), None)
+    if path is None:
+        die(f"no Claude conversation {sid} under {TRANSCRIPTS}")
+    info = transcript_info(path)
+    p = next((project(n) for n in project_names()
+              if info["cwd"] == str(project(n)["repo"]) or info["cwd"].startswith(str(project(n)["repo"]) + "/")), None)
+    if p is None:
+        die(f"{info['cwd']} is in no registered project")
+    name = f"s-{sid[:8]}"
+    if (REG / f"{name}.json").exists():
+        print(f"{name}: already in Grove")
+        return
+    f = {"name": name, "kind": "session", "session": sid, "project": p["name"], "path": info["cwd"],
+         "branch": info["branch"] or run(["git", "-C", info["cwd"], "branch", "--show-current"]).stdout.strip(),
+         "ports": {}, "title": title or info["title"] or f"Session {sid[:8]}", "confirmResume": True,
+         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    write_json(REG / f"{name}.json", f)
+    open_window(f)
+    rel = info["cwd"][len(str(p["repo"])):].lstrip("/") or "main checkout"
+    print(f"{name}: “{f['title']}” ({rel}) — type /exit in its old terminal, then press Enter in its Grove panel")
+
+
+def cmd_sessions(args: list[str]) -> None:
+    hours = float(args[args.index("--hours") + 1]) if "--hours" in args else 24
+    p = project(args[args.index("--project") + 1] if "--project" in args else project_here() or default_project())
+    rows = recent_sessions(p, hours)
+    if not rows:
+        print(f"no Claude conversations in {p['repo']} in the last {hours:g}h outside feature worktrees")
+    for i in rows:
+        rel = i["cwd"][len(str(p["repo"])):].lstrip("/") or "."
+        age = time.strftime("%m-%d %H:%M", time.localtime(i["mtime"]))
+        print(f"{i['id']}  {age}  {rel:<14} {i['title'] or '(untitled)'}")
+
+
 def tidy_title(text: str) -> str:
     """A PR title as a sidebar title: no conventional-commit prefix, no trailing ticket."""
     text = re.sub(r"^\w+(\([^)]*\))?!?:\s*", "", text.strip())
@@ -837,6 +929,18 @@ def claude_running_in(path: str) -> list[str]:
 def cmd_agent(name: str) -> None:
     f = feature(name)
     os.chdir(f["path"])
+    if f.get("kind") == "session":
+        if f.get("confirmResume"):
+            print(f"“{f['title']}” moves here from where it was running.")
+            print("First type /exit in its old terminal tab (two live copies of one conversation would")
+            print("interleave), then press Enter here to resume it.  Ctrl-C leaves this panel as a shell.")
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                os.execvp(os.environ.get("SHELL", "zsh"), [os.environ.get("SHELL", "zsh")])
+            f.pop("confirmResume", None)
+            write_json(REG / f"{name}.json", f)
+        os.execvp("claude", ["claude", "--resume", f["session"]])
     others = claude_running_in(f["path"])
     if others:
         print(f"Claude is already running in this worktree in another terminal: {', '.join(others)}.")
@@ -1016,6 +1120,8 @@ def cmd_doctor() -> None:
         if not wt.exists():
             warn(f"worktree {wt} is gone — fh done {f['name']}")
             continue
+        if f.get("kind") == "session":
+            continue
         try:
             p = project_of(f)
         except SystemExit:
@@ -1134,7 +1240,9 @@ def cmd_statusline() -> None:
     data = parse_json(raw)
     cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd") or os.getcwd()
     regs = features()
-    here = next((f for f in regs if cwd == f["path"] or cwd.startswith(f["path"] + "/")), None)
+    sid = data.get("session_id")
+    here = next((f for f in regs if (f.get("session") == sid if f.get("kind") == "session"
+                                     else cwd == f["path"] or cwd.startswith(f["path"] + "/"))), None)
     legacy = HOME / ".claude/statusline-feature.sh"
     if here is not None and ui_mode() == "app":
         # the app's sidebar is the switcher: only what it doesn't show (and never empty, so Claude
@@ -1198,6 +1306,8 @@ def main(argv: list[str]) -> None:
         cmd_project(rest)
     elif cmd == "adopt":
         cmd_adopt(rest)
+    elif cmd == "sessions":
+        cmd_sessions(rest)
     elif cmd == "go":
         need(1, "go <name>")
         f = feature(rest[0])
