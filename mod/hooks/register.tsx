@@ -597,7 +597,8 @@ export const register: Register = on => {
   })
 
   on('session.end', async ($, e, next) => {
-    await setState($, 'offline')
+    // a /clear ends the conversation, not the session: it is still there, waiting for you
+    await setState($, e.reason === 'clear' ? 'ready' : 'offline')
 
     return next(e)
   })

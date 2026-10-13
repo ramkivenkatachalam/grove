@@ -5,6 +5,7 @@ per feature, for any project described by a project config (see `fh project`).
   fh new <name|TICKET-123> [--project P] [--title T] [--parent NAME] [--base REF] [-p PROMPT]
                          worktree on <you>/<name>, its own ports, env rewritten, deps prepared,
                          servers up, Claude briefed (ticket / prompt)
+  fh adopt <worktree>…   register existing worktrees as features (services start stopped)
   fh ls                  features, ports, servers, labels, PR/CI, session state
   fh go <name>           (tmux UI) switch to the feature's window
   fh up|down|restart <name>   start / stop / restart the feature's services
@@ -758,9 +759,86 @@ def cmd_new(args: list[str]) -> None:
     print(f"{name}: {wt} [{branch}]  {service_urls(f) or 'no services'}" + ("  (agent briefed)" if ticket or prompt else ""))
 
 
+def cmd_adopt(args: list[str]) -> None:
+    """Register an existing worktree as a feature: nothing new is created; it gets its own ports, its
+    env rewritten, and sessions with services stopped (start them with fh up)."""
+    title = proj = name = None
+    paths = []
+    it = iter(args)
+    for a in it:
+        if a == "--title":
+            title = next(it, None)
+        elif a == "--project":
+            proj = next(it, None)
+        elif a == "--name":
+            name = next(it, None)
+        else:
+            paths.append(a)
+    if not paths:
+        die("adopt <worktree path>… [--name N] [--title T] [--project P]")
+    for raw in paths:
+        wt = expand(raw)
+        if run(["git", "-C", str(wt), "rev-parse", "--git-dir"]).returncode:
+            print(f"fh: {wt} is not a git worktree", file=sys.stderr)
+            continue
+        common = expand(run(["git", "-C", str(wt), "rev-parse", "--path-format=absolute", "--git-common-dir"]).stdout.strip())
+        p = project(proj) if proj else next(
+            (project(n) for n in project_names() if (project(n)["repo"] / ".git").resolve() == common), None)
+        if p is None:
+            print(f"fh: {wt} belongs to no registered project (fh project add <its main checkout>)", file=sys.stderr)
+            continue
+        if any(f["path"] == str(wt) for f in features()):
+            print(f"{wt}: already a feature")
+            continue
+        branch = run(["git", "-C", str(wt), "branch", "--show-current"]).stdout.strip()
+        tail = branch.split("/")[-1] or wt.name
+        fname = (name if name and len(paths) == 1 else re.sub(r"[^a-z0-9._-]+", "-", tail.lower()))[:40].strip("-.")
+        if (REG / f"{fname}.json").exists():
+            fname = f"{fname[:36]}-{wt.name[-3:]}"
+        m = re.match(r"^([a-z][a-z0-9]*-\d+)", fname)
+        pr_title = run(["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "title",
+                        "--jq", ".[0].title // \"\""], cwd=p["repo"]).stdout.strip() if branch else ""
+        taken = listening() | {port for other in features() for port in ports(other).values()}
+        assigned = {}
+        for svc in services(p):
+            assigned[svc["name"]] = alloc(svc, taken | set(assigned.values()))
+        f = {"name": fname, "project": p["name"], "path": str(wt), "branch": branch, "ports": assigned,
+             "ticket": m.group(1).upper() if m else None,
+             "title": title if title and len(paths) == 1 else pr_title or tail.replace("-", " ").strip().capitalize(),
+             "adopted": True, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        f["links"] = {svc["name"]: fill(svc["open"], f, assigned[svc["name"]]) for svc in services(p) if svc.get("open")}
+        if p.get("agentNotes"):
+            f["agentNotes"] = p["agentNotes"]
+        provision(p, f)
+        write_json(REG / f"{fname}.json", f)
+        open_window(f, servers=False)
+        print(f"{fname}: adopted {wt} [{branch}] “{f['title']}”  {service_urls(f)} (services stopped: fh up {fname})")
+
+
+def claude_running_in(path: str) -> list[str]:
+    """Claude processes whose working directory is this worktree (or below), outside Grove's sessions."""
+    found = []
+    for pid in run(["pgrep", "-x", "claude"]).stdout.split():
+        cwd = next((ln[1:] for ln in run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"]).stdout.splitlines()
+                    if ln.startswith("n")), "")
+        if cwd == path or cwd.startswith(path + "/"):
+            tty = run(["ps", "-o", "tty=", "-p", pid]).stdout.strip()
+            found.append(f"pid {pid} ({tty})")
+    return found
+
+
 def cmd_agent(name: str) -> None:
     f = feature(name)
     os.chdir(f["path"])
+    others = claude_running_in(f["path"])
+    if others:
+        print(f"Claude is already running in this worktree in another terminal: {', '.join(others)}.")
+        print("Two sessions on one worktree would trip over each other. Exit that one, then press Enter")
+        print("here to continue its conversation in Grove (or Ctrl-C to leave this panel as a shell).")
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            os.execvp(os.environ.get("SHELL", "zsh"), [os.environ.get("SHELL", "zsh")])
     brief = BRIEFS / f"{name}.md"
     if brief.exists():
         text = brief.read_text()
@@ -1111,6 +1189,8 @@ def main(argv: list[str]) -> None:
         cmd_new(rest)
     elif cmd == "project":
         cmd_project(rest)
+    elif cmd == "adopt":
+        cmd_adopt(rest)
     elif cmd == "go":
         need(1, "go <name>")
         f = feature(rest[0])
