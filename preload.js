@@ -1,7 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('hub', {
-  state: () => ipcRenderer.invoke('state'),
+  project: new URLSearchParams(location.search).get('project') || null,
+  state: (project) => ipcRenderer.invoke('state', project),
   onState: (fn) => ipcRenderer.on('state', (_e, state) => fn(state)),
   onMenu: (fn) => ipcRenderer.on('menu', (_e, action) => fn(action)),
   fh: (args) => ipcRenderer.invoke('fh', args),
@@ -9,6 +10,9 @@ contextBridge.exposeInMainWorld('hub', {
   open: (url) => ipcRenderer.send('open', url),
   reveal: (dir) => ipcRenderer.send('reveal', dir),
   rowMenu: (feature) => ipcRenderer.invoke('row-menu', feature),
+  projectMenu: (current) => ipcRenderer.invoke('project-menu', current),
+  openProject: (name) => ipcRenderer.send('open-project', name),
+  addProject: () => ipcRenderer.invoke('add-project'),
   confirm: (message, detail) => ipcRenderer.invoke('confirm', message, detail),
   term: {
     open: (opts) => ipcRenderer.invoke('term:open', opts),

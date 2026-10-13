@@ -107,7 +107,7 @@ function TerminalView({ termKey, session, focus }) {
 }
 
 // ---------- sidebar ----------
-function Sidebar({ features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, onCreate, creating, filterRef }) {
+function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, onCreate, creating, filterRef }) {
   const [filter, setFilter] = useState('')
   const [draft, setDraft] = useState('')
   const [newName, setNewName] = useState('')
@@ -125,7 +125,18 @@ function Sidebar({ features, current, onPick, onMenu, renaming, setRenaming, onR
     setTask('')
   }
   return (
-    <nav className="side" aria-label="Features">
+    <nav className="side" aria-label={`Features of ${project || 'no project'}`}>
+      <div className="project">
+        <div className="pname" title={repo}>
+          <b>{project || 'No project'}</b>
+          <span>{repo.replace(/^\/Users\/[^/]+/, '~') || 'add a project to begin'}</span>
+        </div>
+        <button className="swap" type="button" title="Open another project (⌘⇧1…9) or add one (⌘⇧O)"
+          aria-label={`Switch project${elsewhere ? `, ${elsewhere} feature${elsewhere > 1 ? 's' : ''} need you in other projects` : ''}`}
+          onClick={() => hub.projectMenu(project)}>
+          ⇄{elsewhere > 0 && <span className="elsewhere">❗{elsewhere}</span>}
+        </button>
+      </div>
       <div className="side-top">
         <label className="search">
           <span aria-hidden="true">⌕</span>
@@ -258,7 +269,7 @@ function Header({ f, pal, panels, openList, onToggle }) {
 // ---------- app ----------
 function App() {
   const [state, setState] = useState({ features: [], palette: {} })
-  const [current, setCurrent] = useState(() => localStorage.getItem('current') || '')
+  const [current, setCurrent] = useState(() => localStorage.getItem(`current:${hub.project}`) || '')
   const [hosted, setHosted] = useState({}) // name -> { pane: { session, hint } }
   const [openPanels, setOpenPanels] = useState(() => {
     try { return JSON.parse(localStorage.getItem('open') || '{}') } catch { return {} }
@@ -271,7 +282,7 @@ function App() {
   const filterRef = useRef(null)
 
   useEffect(() => {
-    hub.state().then(setState)
+    hub.state(hub.project).then(setState)
     hub.onState(setState)
   }, [])
   const features = state.features
@@ -290,7 +301,7 @@ function App() {
   useEffect(() => {
     if (f && f.name !== current) setCurrent(f.name)
   }, [f?.name])
-  useEffect(() => { if (current) localStorage.setItem('current', current) }, [current])
+  useEffect(() => { if (current) localStorage.setItem(`current:${hub.project}`, current) }, [current])
   useEffect(() => { localStorage.setItem('open', JSON.stringify(openPanels)) }, [openPanels])
 
   const say = (text, isError = false) => {
@@ -326,7 +337,7 @@ function App() {
   const create = async (name, task) => {
     setNewOpen(false)
     setCreating(name)
-    const r = await hub.fh(['new', name, ...(task ? ['-p', task] : [])])
+    const r = await hub.fh(['new', name, ...(state.project ? ['--project', state.project] : []), ...(task ? ['-p', task] : [])])
     setCreating(null)
     if (r.code) return say((r.stderr || r.stdout).trim(), true)
     setCurrent(name.toLowerCase())
@@ -398,15 +409,25 @@ function App() {
 
   return (
     <div className="app" style={vars}>
-      <Sidebar features={features} current={f?.name} onPick={(n) => { setCurrent(n); setZoom(null) }} onMenu={rowMenu}
+      <Sidebar project={state.project} repo={state.repo || ''} elsewhere={Object.values(state.waitingElsewhere || {}).reduce((a, b) => a + b, 0)} features={features} current={f?.name} onPick={(n) => { setCurrent(n); setZoom(null) }} onMenu={rowMenu}
         renaming={renaming} setRenaming={setRenaming} onRename={rename}
         newOpen={newOpen} setNewOpen={setNewOpen} onCreate={create} creating={creating} filterRef={filterRef} />
       <main className="main">
         {!f && (
           <div className="empty">
-            <h1>No features yet</h1>
-            <p>Each feature gets a worktree, its own ports, servers and a Claude session.</p>
-            <button className="btn primary" type="button" onClick={() => setNewOpen(true)}>New feature  ⌘N</button>
+            {state.project ? (
+              <>
+                <h1>No features in {state.project} yet</h1>
+                <p>Each feature gets a worktree, its own ports, services and a Claude session.</p>
+                <button className="btn primary" type="button" onClick={() => setNewOpen(true)}>New feature  ⌘N</button>
+              </>
+            ) : (
+              <>
+                <h1>Add a project to begin</h1>
+                <p>Choose the main checkout of a git repository. A .grove.json in it describes its services.</p>
+                <button className="btn primary" type="button" onClick={() => hub.addProject()}>Add project  ⌘⇧O</button>
+              </>
+            )}
           </div>
         )}
         {f && (

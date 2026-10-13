@@ -1,6 +1,6 @@
-// Feature Hub: the Electron main process. State comes from ~/.claude/feature-hub (written by `fh`
-// and the feature-hub Claude Code mod); actions go through `fh`; every terminal is a tmux session
-// attached through ptybridge.py, so quitting the app never stops an agent or a server.
+// Grove: the Electron main process. One window per project. State comes from ~/.claude/feature-hub
+// (written by `fh` and the Claude Code mod); actions go through `fh`; every terminal is a tmux session
+// attached through ptybridge.py, so closing a window or quitting never stops an agent or a server.
 const { app, BrowserWindow, ipcMain, shell, Menu, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -14,8 +14,9 @@ const FH = process.env.GROVE_BIN || path.join(HUB, 'bin/fh')
 process.env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(HOME, '.local/bin'), process.env.PATH]
   .filter(Boolean).join(':')
 
-let win = null
-const terms = new Map() // id -> child process
+const windows = new Map() // project -> BrowserWindow
+const terms = new Map() // terminal id -> { child, sender }
+let quitting = false
 
 function readJSON(file, fallback) {
   try {
@@ -35,32 +36,68 @@ function palette() {
   return pal
 }
 
-
-function loadState() {
+// ---- projects ----
+function projects() {
   let names = []
   try {
-    names = fs.readdirSync(path.join(HUB, 'features')).filter((f) => f.endsWith('.json'))
+    names = fs.readdirSync(path.join(HUB, 'projects')).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)).sort()
+  } catch {}
+  return names.map((name) => {
+    const repo = (readJSON(path.join(HUB, 'projects', name + '.json'), {}).repo || '').replace(/^~/, HOME)
+    return { name, repo }
+  })
+}
+
+function defaultProject() {
+  const names = projects().map((p) => p.name)
+  const chosen = readJSON(path.join(HUB, 'config.json'), {}).defaultProject
+  return names.includes(chosen) ? chosen : names[0] || null
+}
+
+function allFeatures() {
+  let files = []
+  try {
+    files = fs.readdirSync(path.join(HUB, 'features')).filter((f) => f.endsWith('.json'))
   } catch {}
   const prs = (readJSON(path.join(HUB, 'prs.json'), {}).byBranch) || {}
-  const features = names
+  const fallback = defaultProject()
+  return files
     .map((file) => readJSON(path.join(HUB, 'features', file), null))
     .filter(Boolean)
     .map((f) => ({
       ...f,
+      project: f.project || fallback,
       title: f.title || f.name,
       status: readJSON(path.join(HUB, 'status', f.name + '.json'), { state: 'offline' }),
       pr: prs[f.branch] || null,
     }))
     .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.name.localeCompare(b.name))
-  return { features, palette: palette(), focus: readJSON(path.join(HUB, 'focus.json'), null) }
+}
+
+function loadState(project) {
+  const everything = allFeatures()
+  const others = {}
+  for (const f of everything) {
+    if (f.project !== project && f.status.state === 'waiting') others[f.project] = (others[f.project] || 0) + 1
+  }
+  return {
+    project,
+    projects: projects(),
+    repo: (projects().find((p) => p.name === project) || {}).repo || '',
+    features: everything.filter((f) => f.project === project),
+    waitingElsewhere: others,
+    palette: palette(),
+    focus: readJSON(path.join(HUB, 'focus.json'), null),
+  }
 }
 
 function sendState() {
-  if (!win || win.isDestroyed()) return
-  const state = loadState()
-  win.webContents.send('state', state)
-  const waiting = state.features.filter((f) => f.status.state === 'waiting').length
+  for (const [project, w] of windows) {
+    if (!w.isDestroyed()) w.webContents.send('state', loadState(project))
+  }
+  const waiting = allFeatures().filter((f) => f.status.state === 'waiting').length
   app.dock?.setBadge(waiting ? String(waiting) : '')
+  buildMenu()
 }
 
 let pending = null
@@ -82,29 +119,109 @@ function fh(args) {
   })
 }
 
-// ---- terminals ----
-ipcMain.handle('term:open', (_e, { id, session, cols, rows }) => {
+// ---- windows: which projects are open survives a restart ----
+const OPEN_FILE = () => path.join(app.getPath('userData'), 'open-projects.json')
+
+function rememberOpen() {
+  if (quitting) return
+  try {
+    fs.writeFileSync(OPEN_FILE(), JSON.stringify([...windows.keys()]))
+  } catch {}
+}
+
+function closeTerminalsOf(contents) {
+  for (const [id, t] of terms) {
+    if (t.sender === contents) {
+      t.child.stdin.end()
+      terms.delete(id)
+    }
+  }
+}
+
+function openProject(project) {
+  const existing = windows.get(project)
+  if (existing && !existing.isDestroyed()) {
+    existing.show()
+    existing.focus()
+    return existing
+  }
+  const win = new BrowserWindow({
+    width: 1480,
+    height: 920,
+    minWidth: 900,
+    minHeight: 560,
+    title: project ? `${project} — Grove` : 'Grove',
+    backgroundColor: '#161616',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 14, y: 14 },
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
+  })
+  windows.set(project, win)
+  rememberOpen()
+  win.loadFile(path.join(__dirname, 'renderer/index.html'), { query: { project: project || '' } })
+  win.on('page-title-updated', (e) => e.preventDefault()) // keep "<project> — Grove"
+  const contents = win.webContents
+  // a reload starts a new page: detach its old terminals (their tmux sessions keep running)
+  contents.on('did-start-navigation', (_e, _url, _inPlace, isMainFrame) => isMainFrame && closeTerminalsOf(contents))
+  win.on('closed', () => {
+    closeTerminalsOf(contents)
+    windows.delete(project)
+    rememberOpen()
+  })
+  if (process.env.FH_SCREENSHOT && windows.size === 1) {
+    // FH_SCREENSHOT_JS runs once in the page first (e.g. to open panels), for visual checks
+    if (process.env.FH_SCREENSHOT_JS) contents.once('did-finish-load', () => contents.executeJavaScript(process.env.FH_SCREENSHOT_JS))
+    contents.once('did-finish-load', () => setTimeout(async () => {
+      fs.writeFileSync(process.env.FH_SCREENSHOT, (await contents.capturePage()).toPNG())
+      app.quit()
+    }, Number(process.env.FH_SCREENSHOT_DELAY || 6000)))
+  }
+  return win
+}
+
+async function addProject(parent) {
+  const { canceled, filePaths } = await dialog.showOpenDialog(parent, {
+    title: 'Add a project to Grove', message: 'Choose the main checkout of a git repository',
+    properties: ['openDirectory'], buttonLabel: 'Add Project',
+  })
+  if (canceled || !filePaths[0]) return null
+  const result = await fh(['project', 'add', filePaths[0]])
+  if (result.code) {
+    dialog.showMessageBox(parent, { type: 'warning', message: 'Could not add the project', detail: (result.stderr || result.stdout).trim() })
+    return null
+  }
+  const name = (result.stdout.match(/^project (\S+):/) || [])[1]
+  sendState()
+  if (name) openProject(name)
+  return name
+}
+
+// ---- terminals (each belongs to the window that opened it) ----
+ipcMain.handle('term:open', (e, { id, session, cols, rows }) => {
   if (terms.has(id)) return true
   const child = spawn('python3', [path.join(__dirname, 'ptybridge.py'), String(cols), String(rows), '--',
     'tmux', 'attach-session', '-t', '=' + session], { stdio: ['pipe', 'pipe', 'pipe', 'pipe'], env: process.env })
-  terms.set(id, child)
-  child.stdout.on('data', (chunk) => win?.webContents.send('term:data', id, chunk))
-  child.stderr.on('data', (chunk) => win?.webContents.send('term:data', id, chunk))
+  const sender = e.sender
+  terms.set(id, { child, sender })
+  const send = (channel, ...args) => !sender.isDestroyed() && sender.send(channel, ...args)
+  child.stdout.on('data', (chunk) => send('term:data', id, chunk))
+  child.stderr.on('data', (chunk) => send('term:data', id, chunk))
   child.on('exit', () => {
     terms.delete(id)
-    win?.webContents.send('term:exit', id)
+    send('term:exit', id)
   })
   return true
 })
-ipcMain.on('term:write', (_e, id, data) => terms.get(id)?.stdin.write(data))
-ipcMain.on('term:resize', (_e, id, cols, rows) => terms.get(id)?.stdio[3].write(JSON.stringify({ cols, rows }) + '\n'))
+ipcMain.on('term:write', (_e, id, data) => terms.get(id)?.child.stdin.write(data))
+ipcMain.on('term:resize', (_e, id, cols, rows) => terms.get(id)?.child.stdio[3].write(JSON.stringify({ cols, rows }) + '\n'))
 ipcMain.on('term:close', (_e, id) => {
-  terms.get(id)?.stdin.end()
+  terms.get(id)?.child.stdin.end()
   terms.delete(id)
 })
 
 // ---- state and actions ----
-ipcMain.handle('state', () => loadState())
+const windowOf = (e) => BrowserWindow.fromWebContents(e.sender)
+ipcMain.handle('state', (_e, project) => loadState(project))
 ipcMain.handle('fh', async (_e, args) => {
   const result = await fh(args)
   sendState()
@@ -121,10 +238,23 @@ ipcMain.handle('host', async (_e, name) => {
 ipcMain.on('open', (_e, url) => {
   if (/^https?:\/\//.test(url)) shell.openExternal(url)
 })
-ipcMain.handle('row-menu', (_e, feature) => new Promise((resolve) => {
+ipcMain.on('open-project', (_e, name) => openProject(name))
+ipcMain.handle('add-project', (e) => addProject(windowOf(e)))
+ipcMain.handle('project-menu', (e, current) => new Promise((resolve) => {
+  const items = [
+    ...projects().map((p) => ({
+      label: p.name, type: 'checkbox', checked: p.name === current,
+      click: () => { openProject(p.name); resolve(p.name) },
+    })),
+    { type: 'separator' },
+    { label: 'Add Project…', click: () => { addProject(windowOf(e)); resolve(null) } },
+  ]
+  Menu.buildFromTemplate(items).popup({ window: windowOf(e), callback: () => resolve(null) })
+}))
+ipcMain.handle('row-menu', (e, feature) => new Promise((resolve) => {
   const items = [
     { label: 'Rename…', click: () => resolve('rename') },
-    { label: 'Restart servers', click: () => resolve('restart') },
+    { label: 'Restart services', click: () => resolve('restart') },
     { type: 'separator' },
     ...Object.entries(feature.links || {}).map(([svc, url]) => ({ label: `Open ${svc}  ${url}`, click: () => resolve('open:' + url) })),
     ...(feature.prUrl ? [{ label: 'Open pull request', click: () => resolve('open-pr') }] : []),
@@ -132,55 +262,34 @@ ipcMain.handle('row-menu', (_e, feature) => new Promise((resolve) => {
     { type: 'separator' },
     { label: 'Close feature…', click: () => resolve('done') },
   ]
-  Menu.buildFromTemplate(items).popup({ window: win, callback: () => resolve(null) })
+  Menu.buildFromTemplate(items).popup({ window: windowOf(e), callback: () => resolve(null) })
 }))
 ipcMain.on('reveal', (_e, dir) => shell.showItemInFolder(dir))
-ipcMain.handle('confirm', async (_e, message, detail) => {
-  const { response } = await dialog.showMessageBox(win, { type: 'question', buttons: ['Close feature', 'Cancel'], defaultId: 1, cancelId: 1, message, detail })
+ipcMain.handle('confirm', async (e, message, detail) => {
+  const { response } = await dialog.showMessageBox(windowOf(e), { type: 'question', buttons: ['Close feature', 'Cancel'], defaultId: 1, cancelId: 1, message, detail })
   return response === 0
 })
 
-function createWindow() {
-  win = new BrowserWindow({
-    width: 1480,
-    height: 920,
-    minWidth: 900,
-    minHeight: 560,
-    title: 'Grove',
-    backgroundColor: '#161616',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 14, y: 14 },
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, sandbox: false },
-  })
-  win.loadFile(path.join(__dirname, 'renderer/index.html'))
-  // a reload starts a new page: detach its old terminals (their tmux sessions keep running)
-  win.webContents.on('did-start-navigation', (_e, _url, _inPlace, isMainFrame) => {
-    if (!isMainFrame) return
-    for (const child of terms.values()) child.stdin.end()
-    terms.clear()
-  })
-  win.on('closed', () => {
-    for (const child of terms.values()) child.stdin.end()
-    terms.clear()
-    win = null
-  })
-  if (process.env.FH_SCREENSHOT) {
-    // FH_SCREENSHOT_JS runs once in the page first (e.g. to open panels), for visual checks
-    if (process.env.FH_SCREENSHOT_JS) {
-      win.webContents.once('did-finish-load', () => win.webContents.executeJavaScript(process.env.FH_SCREENSHOT_JS))
-    }
-    win.webContents.once('did-finish-load', () => setTimeout(async () => {
-      const image = await win.webContents.capturePage()
-      fs.writeFileSync(process.env.FH_SCREENSHOT, image.toPNG())
-      app.quit()
-    }, Number(process.env.FH_SCREENSHOT_DELAY || 6000)))
-  }
-}
-
+// ---- menus ----
+let lastMenuKey = ''
 function buildMenu() {
-  const send = (action) => () => win?.webContents.send('menu', action)
+  const list = projects()
+  const key = JSON.stringify(list.map((p) => p.name))
+  if (key === lastMenuKey) return
+  lastMenuKey = key
+  const send = (action) => () => BrowserWindow.getFocusedWindow()?.webContents.send('menu', action)
+  const openItems = list.map((p, i) => ({
+    label: p.name, accelerator: i < 9 ? `CmdOrCtrl+Shift+${i + 1}` : undefined, click: () => openProject(p.name),
+  }))
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
+    {
+      label: 'Project',
+      submenu: [
+        { label: 'Open Project', submenu: openItems.length ? openItems : [{ label: 'No projects yet', enabled: false }] },
+        { label: 'Add Project…', accelerator: 'CmdOrCtrl+Shift+O', click: () => addProject(BrowserWindow.getFocusedWindow()) },
+      ],
+    },
     {
       label: 'Feature',
       submenu: [
@@ -188,7 +297,7 @@ function buildMenu() {
         { label: 'Rename…', accelerator: 'CmdOrCtrl+E', click: send('rename') },
         { label: 'Find Feature', accelerator: 'CmdOrCtrl+K', click: send('find') },
         { type: 'separator' },
-        { label: 'Restart Servers', accelerator: 'CmdOrCtrl+Shift+R', click: send('restart') },
+        { label: 'Restart Services', accelerator: 'CmdOrCtrl+Shift+R', click: send('restart') },
       ],
     },
     { role: 'editMenu' },
@@ -204,15 +313,28 @@ function buildMenu() {
     },
     { role: 'windowMenu' },
   ]))
+  app.dock?.setMenu(Menu.buildFromTemplate([
+    ...list.map((p) => ({ label: p.name, click: () => openProject(p.name) })),
+    { type: 'separator' },
+    { label: 'Add Project…', click: () => addProject(null) },
+  ]))
+}
+
+function openRemembered() {
+  const known = new Set(projects().map((p) => p.name))
+  const remembered = readJSON(OPEN_FILE(), []).filter((name) => known.has(name))
+  const start = process.env.GROVE_PROJECT ? [process.env.GROVE_PROJECT] : remembered.length ? remembered : [defaultProject()]
+  for (const name of start) openProject(name)
 }
 
 app.whenReady().then(async () => {
   await fh(['ui', 'app']) // new features get hosted sessions for this app
   buildMenu()
-  createWindow()
+  openRemembered()
   watchHub()
   app.on('activate', () => {
-    if (!win) createWindow()
+    if (windows.size === 0) openRemembered()
   })
 })
+app.on('before-quit', () => { quitting = true })
 app.on('window-all-closed', () => app.quit())

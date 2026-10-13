@@ -20,7 +20,14 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 
 /* ---- sidebar ---- */
 .side { width: 248px; flex-shrink: 0; background: var(--side); border-right: 1px solid var(--side-line); display: flex; flex-direction: column; }
-.side-top { -webkit-app-region: drag; padding: 40px 10px 8px 10px; display: flex; gap: 6px; align-items: center; }
+.side-top { -webkit-app-region: drag; padding: 6px 10px 8px 10px; display: flex; gap: 6px; align-items: center; }
+.project { -webkit-app-region: drag; padding: 40px 12px 6px 14px; display: flex; align-items: center; gap: 8px; }
+.project .pname { flex: 1; min-width: 0; }
+.project .pname b { display: block; color: #ffffff; font-size: 16px; font-weight: 700; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.project .pname span { display: block; color: var(--text-3); font: 11px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.project .swap { -webkit-app-region: no-drag; border: 1px solid #333333; background: #1e1e1e; color: var(--text-2); border-radius: 6px; padding: 3px 8px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.project .swap:hover { color: var(--text); border-color: var(--name); }
+.project .swap .elsewhere { color: var(--waiting); margin-left: 4px; }
 .search { -webkit-app-region: no-drag; flex: 1; display: flex; align-items: center; gap: 6px; background: #222222; border-radius: 6px; padding: 4px 8px; color: var(--text-3); }
 .search input { all: unset; flex: 1; color: var(--text); font-size: 12px; }
 .search input::placeholder { color: var(--text-3); }

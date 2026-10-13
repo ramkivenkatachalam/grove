@@ -8,6 +8,8 @@ side and tells you which one needs you.
 
 ## What you get
 
+- **One window per project**, its name at the top of the sidebar; ⇄ opens another project and shows
+  how many features need you elsewhere. Grove reopens the projects you had open.
 - **Sidebar** (Warp-style): every feature with its state (❗ needs you · ✓ your turn · ⏳ working),
   title, branch and PR/CI. Search (⌘K), **+ New** (⌘N), double-click to rename, right-click for more.
 - **Header**: the feature's title, state, a one-line recap, the **next step**, PR / CI / review
@@ -77,5 +79,5 @@ Then add the settings lines `install.sh` prints, so every Claude session loads t
 
 ## Keys
 
-⌘1–9 switch · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
+⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
 ⌘⇧R restart servers · right-click a feature for more · ⌥-drag selects text inside a terminal.
