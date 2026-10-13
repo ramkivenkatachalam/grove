@@ -7,12 +7,12 @@ one git worktree per feature. README.md is the user-facing description; this fil
 
 | Piece | Source | Live location (symlinked to the source) |
 |---|---|---|
-| CLI `fh` / `grove` (Python 3, **stdlib only**) | `cli/fh` | `~/.claude/feature-hub/bin/fh`, `~/.local/bin/{fh,grove}` |
-| Claude Code mod (function hooks, TypeScript) | `mod/` | `~/.claude/feature-hub/mod`, loaded via `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json` |
+| CLI `fh` / `grove` (Python 3, **stdlib only**) | `cli/fh` | `~/.grove/bin/fh`, `~/.local/bin/{fh,grove}` |
+| Claude Code mod (function hooks, TypeScript) | `mod/` | `~/.grove/mod`, loaded via `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json` |
 | Mac app (Electron 44 + React 19 + xterm.js 6) | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | `/Applications/Grove.app` (a built copy: rebuild to update) |
-| tmux front end | `tmux/grove.tmux.conf` | `~/.claude/feature-hub/tmux.conf`, sourced from `~/.tmux.conf` |
+| tmux front end | `tmux/grove.tmux.conf` | `~/.grove/tmux.conf`, sourced from `~/.tmux.conf` |
 
-Runtime state, never in git: `~/.claude/feature-hub/` — `features/*.json` (registry), `status/*.json`
+Runtime state, never in git: `~/.grove/` — `features/*.json` (registry), `status/*.json`
 (written by the mod), `projects/*.json` (per-project config; Numos's is private there), `prs.json`,
 `feedback.json`, `theme.json`, `config.json` (`ui: app|tmux`, `defaultProject`), `focus.json`, `briefs/`.
 
@@ -44,7 +44,7 @@ mod reports from inside each Claude session; tmux hosts every process (`fh_<feat
   commit messages. Push to `origin` (github.com/ramkivenkatachalam/grove, private). Remote `work`
   (ramki-numosai/grove) and branch `work-main` are frozen history — don't push there.
 - **Never put Numos-specific config in this repo.** Project specifics belong in that project's
-  `.grove.json` or the user's private `~/.claude/feature-hub/projects/<name>.json`.
+  `.grove.json` or the user's private `~/.grove/projects/<name>.json`.
 
 ## Gotchas learned the hard way
 

@@ -459,7 +459,7 @@ async function setState($: EngineInterface, state: FeatureState, message = '') {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('HOME')) ?? ''
-    hub = `${home}/.claude/feature-hub`
+    hub = `${home}/.grove`
     fh = `${hub}/bin/fh`
     const registry = await readRegistry($)
     const sid = await $.session.id()

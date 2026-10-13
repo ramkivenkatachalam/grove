@@ -1,4 +1,4 @@
-// Grove: the Electron main process. One window per project. State comes from ~/.claude/feature-hub
+// Grove: the Electron main process. One window per project. State comes from ~/.grove
 // (written by `fh` and the Claude Code mod); actions go through `fh`; every terminal is a tmux session
 // attached through ptybridge.py, so closing a window or quitting never stops an agent or a server.
 const { app, BrowserWindow, ipcMain, shell, Menu, dialog } = require('electron')
@@ -8,7 +8,7 @@ const os = require('os')
 const { spawn, execFile } = require('child_process')
 
 const HOME = os.homedir()
-const HUB = process.env.GROVE_HUB || path.join(HOME, '.claude/feature-hub')
+const HUB = process.env.GROVE_HUB || path.join(HOME, '.grove')
 const FH = process.env.GROVE_BIN || path.join(HUB, 'bin/fh')
 // a Finder-launched app has a bare PATH: tmux, gh, git and claude live in these
 process.env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(HOME, '.local/bin'), process.env.PATH]

@@ -3,7 +3,7 @@
 #   ./install.sh
 set -euo pipefail
 R="$(cd "$(dirname "$0")" && pwd)"
-H="$HOME/.claude/feature-hub"
+H="$HOME/.grove"
 mkdir -p "$H/bin" "$H/features" "$H/status" "$H/briefs"
 
 link() {  # link <target in repo> <live path>
@@ -16,7 +16,7 @@ link "$R/mod" "$H/mod"
 link "$R/tmux/grove.tmux.conf" "$H/tmux.conf"
 mkdir -p "$HOME/.local/bin" && ln -sfn "$R/cli/fh" "$HOME/.local/bin/fh" && ln -sfn "$R/cli/fh" "$HOME/.local/bin/grove"
 
-grep -q "feature-hub/tmux.conf" "$HOME/.tmux.conf" 2>/dev/null || echo "source-file $H/tmux.conf" >> "$HOME/.tmux.conf"
+grep -q ".grove/tmux.conf" "$HOME/.tmux.conf" 2>/dev/null || echo "source-file $H/tmux.conf" >> "$HOME/.tmux.conf"
 
 cat <<MSG
 

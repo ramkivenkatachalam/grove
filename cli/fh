@@ -41,7 +41,7 @@ import time
 from pathlib import Path
 
 HOME = Path.home()
-HUB = Path(os.environ.get("GROVE_HUB", HOME / ".claude/feature-hub"))
+HUB = Path(os.environ.get("GROVE_HUB", HOME / ".grove"))
 REG, STATUS, BRIEFS, PROJECTS = HUB / "features", HUB / "status", HUB / "briefs", HUB / "projects"
 PRS, FEEDBACK, CONFIG, THEME = HUB / "prs.json", HUB / "feedback.json", HUB / "config.json", HUB / "theme.json"
 FH = os.environ.get("GROVE_BIN", str(HUB / "bin/fh"))
@@ -87,7 +87,7 @@ def expand(path: str) -> Path:
 # ---------- projects ----------
 #
 # A project config says how to grow a feature from a repo. It is the repo's own `.grove.json`
-# (shareable, committed by the team) merged under ~/.claude/feature-hub/projects/<name>.json
+# (shareable, committed by the team) merged under ~/.grove/projects/<name>.json
 # (yours: at least {"repo": …}; anything here overrides the repo's file).
 #
 #   repo          the main checkout                        worktrees  where worktrees go (default: beside repo)

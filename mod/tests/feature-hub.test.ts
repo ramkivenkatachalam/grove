@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-const HUB = '/home/me/.claude/feature-hub'
+const HUB = '/home/me/.grove'
 const WT = '/home/me/code/flux'
 const REGISTRY = { name: 'flux', project: 'acme', path: WT, branch: 'me/flux', ports: { be: 5006, fe: 3001 }, agentNotes: 'Sign-in works on the fe port.' }
 

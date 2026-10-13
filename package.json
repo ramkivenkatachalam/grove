@@ -8,7 +8,7 @@
   "scripts": {
     "build": "esbuild renderer/app.jsx --bundle --outfile=renderer/dist/app.js --jsx=automatic --target=chrome124 --loader:.css=css",
     "start": "npm run build && electron .",
-    "shot": "npm run build && FH_SCREENSHOT=/tmp/feature-hub.png electron .",
+    "shot": "npm run build && FH_SCREENSHOT=/tmp/grove.png electron .",
     "icon": "npx electron build/render-icon.js && cd build && rm -rf grove.iconset && mkdir grove.iconset && for s in 16 32 128 256 512; do sips -z $s $s icon-1024.png --out grove.iconset/icon_${s}x${s}.png >/dev/null; sips -z $((s*2)) $((s*2)) icon-1024.png --out grove.iconset/icon_${s}x${s}@2x.png >/dev/null; done && iconutil -c icns grove.iconset -o icon.icns",
     "dist": "npm run build && npx @electron/packager . Grove --platform=darwin --arch=arm64 --icon=build/icon.icns --out=out --overwrite --no-asar --app-bundle-id=com.ramki.grove --app-category-type=public.app-category.developer-tools --ignore='^/(build|out|renderer/app\\.jsx|renderer/styles\\.css|node_modules)' && codesign --force --deep --sign - out/Grove-darwin-arm64/Grove.app",
     "install-app": "npm run dist && rm -rf /Applications/Grove.app && cp -R out/Grove-darwin-arm64/Grove.app /Applications/"

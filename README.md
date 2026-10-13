@@ -30,7 +30,7 @@ Quitting Grove stops nothing: every terminal is a tmux session (`fh_<feature>_<p
  └───────┬──────────────────────────┬────────────┘
    reads state files          attaches terminals
          │                          │
- ~/.claude/feature-hub/        tmux sessions  fh_<feature>_<pane>
+ ~/.grove/                     tmux sessions  fh_<feature>_<pane>
    features/  status/          (claude · shell · services …)
    projects/  prs.json              ▲            ▲
          ▲      ▲                   │            │
@@ -47,13 +47,13 @@ hosts every process, so the app can come and go.
 
 | Piece | Where | Role |
 |---|---|---|
-| App | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | Electron + React + xterm.js. Reads state from `~/.claude/feature-hub`, attaches terminals to tmux sessions through a tiny Python pty bridge (no native modules) |
+| App | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | Electron + React + xterm.js. Reads state from `~/.grove`, attaches terminals to tmux sessions through a tiny Python pty bridge (no native modules) |
 | `grove` CLI (`fh`) | `cli/fh` | Python, stdlib only. Projects, worktrees, per-service port allocation, env rewriting, dev servers, PR/CI sync, review-bot findings, ticket briefs, cleanup, `grove doctor` |
 | Claude Code mod | `mod/` | Function hooks loaded by every Claude Code session: publishes each session's state, recap and next step, notifications, the `new_feature` tool, `/feature` commands |
 | tmux | `fh_<feature>_<pane>` sessions | Hosts every Claude, service and shell process; the app attaches to them and nothing stops when it quits |
 | tmux config | `tmux/grove.tmux.conf` | The terminal-only front end (header in tmux's status line), used with `fh ui tmux` |
 
-State lives in `~/.claude/feature-hub/`: `features/*.json` (registry), `status/*.json` (per-session
+State lives in `~/.grove/`: `features/*.json` (registry), `status/*.json` (per-session
 state written by the mod), `projects/*.json`, `prs.json`, `theme.json`, `config.json`.
 
 ## Projects
@@ -66,7 +66,7 @@ grove new csv-export                 # in or outside the repo; --project picks o
 ```
 
 The config is the repo's own **`.grove.json`** (commit it to share it with your team) merged under
-**`~/.claude/feature-hub/projects/<name>.json`** (yours; at least `{"repo": "~/code/my-repo"}`).
+**`~/.grove/projects/<name>.json`** (yours; at least `{"repo": "~/code/my-repo"}`).
 
 | Key | What it does |
 |---|---|
@@ -107,7 +107,7 @@ to start a second Claude on a worktree that already has one.
 ## Install
 
 ```sh
-./install.sh                 # links cli/, mod/ and tmux/ into ~/.claude/feature-hub
+./install.sh                 # links cli/, mod/ and tmux/ into ~/.grove
 npm install
 npm run install-app          # builds Grove.app into /Applications
 ```

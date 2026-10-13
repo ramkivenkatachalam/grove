@@ -1,5 +1,5 @@
 {
-  "_help": "Example .grove.json for a repo with a Next.js frontend and a FastAPI backend. Commit it to the repo root; personal overrides go in ~/.claude/feature-hub/projects/<name>.json.",
+  "_help": "Example .grove.json for a repo with a Next.js frontend and a FastAPI backend. Commit it to the repo root; personal overrides go in ~/.grove/projects/<name>.json.",
   "base": "origin/main",
   "branchPrefix": "{user}/",
   "setup": {
