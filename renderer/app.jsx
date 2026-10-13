@@ -9,8 +9,10 @@ import './styles.css'
 const hub = window.hub
 // a feature's services and ports; registries from before projects had fePort / bePort
 const portsOf = (f) => f.ports || Object.fromEntries(Object.entries({ be: f.bePort, fe: f.fePort }).filter(([, v]) => v))
-// sessions sit in the project's main checkout (or a folder of it)
-const state_repo = (f) => f.path
+// where a session runs: the project's main checkout, a folder of it, or elsewhere (its own path)
+const placeOf = (dir, repo) => dir === repo ? 'main checkout'
+  : repo && dir.startsWith(repo + '/') ? dir.slice(repo.length + 1)
+  : dir.replace(/^\/Users\/[^/]+/, '~')
 const STAGES = ['Explore', 'Design', 'Spec', 'Build', 'Verify', 'PR', 'Review', 'Merged']
 // a glyph and a word for every state: colour only reinforces
 const STATE = {
@@ -182,11 +184,11 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
             )
           }
           const where = f.kind === 'session'
-            ? `◷ ${f.path === repo ? 'main checkout' : f.path.slice(repo.length + 1)} · ⎇ ${f.branch || '?'}`
+            ? `◷ ${placeOf(f.path, repo)} · ⎇ ${f.branch || '?'}`
             : null
           return (
             <li key={f.name}>
-              {heading && <div className="group" role="presentation">Sessions in the main checkout</div>}
+              {heading && <div className="group" role="presentation">Sessions</div>}
               <button type="button" className={`row ${f.name === current ? 'current' : ''} ${st}`} aria-current={f.name === current ? 'page' : undefined}
                 title={`${f.title} — ${STATE[st].word}${f.status.message ? `: ${f.status.message}` : ''}`}
                 onClick={() => onPick(f.name)} onDoubleClick={() => setRenaming(f.name)}
@@ -208,7 +210,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
 }
 
 // ---------- header (design A) ----------
-function Header({ f, pal, panels, openList, onToggle }) {
+function Header({ f, pal, panels, openList, onToggle, repo }) {
   const st = f.status.state || 'offline'
   const d = f.status.details || {}
   const fill = st === 'offline' ? '#a8a8a8' : pal[st]
@@ -237,7 +239,7 @@ function Header({ f, pal, panels, openList, onToggle }) {
         </span>
         <span className="grow" />
         <span className="facts">
-          {f.kind === 'session' ? <span>{f.path === state_repo(f) ? 'main checkout' : 'session'} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
+          {f.kind === 'session' ? <span>{placeOf(f.path, repo)} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
           {ci && <span style={{ color: ci[0] === 'ready' ? pal.ready : ci[0] }}>{ci[1]}</span>}
           {pr && pr.state !== 'OPEN' && <span>{pr.state.toLowerCase()}</span>}
           {pr?.findings > 0 && <span style={{ color: pal.accent }}>{pr.findings} finding{pr.findings > 1 ? 's' : ''}</span>}
@@ -439,7 +441,7 @@ function App() {
         )}
         {f && (
           <>
-            <Header f={f} pal={pal} panels={sessions ? Object.values(sessions).filter((s) => s.pane !== 'claude').map((s) => ({ name: s.pane, key: s.key })) : []} openList={open} onToggle={toggle} />
+            <Header repo={state.repo || ''} f={f} pal={pal} panels={sessions ? Object.values(sessions).filter((s) => s.pane !== 'claude').map((s) => ({ name: s.pane, key: s.key })) : []} openList={open} onToggle={toggle} />
             <div className="work">
               <section className="claude" aria-label="Claude session">
                 {sessions?.claude ? <TerminalView termKey={`${f.name}:claude`} session={sessions.claude.session} focus={!zoom} />
