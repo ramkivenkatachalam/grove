@@ -804,7 +804,7 @@ def cmd_adopt(args: list[str]) -> None:
             assigned[svc["name"]] = alloc(svc, taken | set(assigned.values()))
         f = {"name": fname, "project": p["name"], "path": str(wt), "branch": branch, "ports": assigned,
              "ticket": m.group(1).upper() if m else None,
-             "title": title if title and len(paths) == 1 else pr_title or tail.replace("-", " ").strip().capitalize(),
+             "title": title if title and len(paths) == 1 else tidy_title(pr_title) or tail.replace("-", " ").strip().capitalize(),
              "adopted": True, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         f["links"] = {svc["name"]: fill(svc["open"], f, assigned[svc["name"]]) for svc in services(p) if svc.get("open")}
         if p.get("agentNotes"):
@@ -813,6 +813,13 @@ def cmd_adopt(args: list[str]) -> None:
         write_json(REG / f"{fname}.json", f)
         open_window(f, servers=False)
         print(f"{fname}: adopted {wt} [{branch}] “{f['title']}”  {service_urls(f)} (services stopped: fh up {fname})")
+
+
+def tidy_title(text: str) -> str:
+    """A PR title as a sidebar title: no conventional-commit prefix, no trailing ticket."""
+    text = re.sub(r"^\w+(\([^)]*\))?!?:\s*", "", text.strip())
+    text = re.sub(r"\s*\(([A-Z][A-Z0-9]*-\d+)\)\s*$", "", text)
+    return text[:1].upper() + text[1:]
 
 
 def claude_running_in(path: str) -> list[str]:
