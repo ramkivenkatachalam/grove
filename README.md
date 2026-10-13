@@ -24,11 +24,33 @@ Quitting Grove stops nothing: every terminal is a tmux session (`fh_<feature>_<p
 
 ## How it fits together
 
+```
+ ┌──────────── Grove.app (Electron) ─────────────┐
+ │ sidebar · header · Claude panel · log panels  │   one window per project
+ └───────┬──────────────────────────┬────────────┘
+   reads state files          attaches terminals
+         │                          │
+ ~/.claude/feature-hub/        tmux sessions  fh_<feature>_<pane>
+   features/  status/          (claude · shell · services …)
+   projects/  prs.json              ▲            ▲
+         ▲      ▲                   │            │
+   writes│      │writes        starts│            │runs inside
+   ┌─────┴──┐ ┌─┴────────────────────┴──┐    ┌───┴─────────────┐
+   │ grove  │ │ Claude Code mod          │    │ Claude Code     │
+   │  CLI   │ │ (loaded by every session)│◀───│ sessions        │
+   └────────┘ └──────────────────────────┘    └─────────────────┘
+```
+
+The app only draws; the CLI does the work; the mod reports from inside each Claude session; tmux
+hosts every process, so the app can come and go.
+
+
 | Piece | Where | Role |
 |---|---|---|
 | App | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | Electron + React + xterm.js. Reads state from `~/.claude/feature-hub`, attaches terminals to tmux sessions through a tiny Python pty bridge (no native modules) |
 | `grove` CLI (`fh`) | `cli/fh` | Python, stdlib only. Projects, worktrees, per-service port allocation, env rewriting, dev servers, PR/CI sync, review-bot findings, ticket briefs, cleanup, `grove doctor` |
 | Claude Code mod | `mod/` | Function hooks loaded by every Claude Code session: publishes each session's state, recap and next step, notifications, the `new_feature` tool, `/feature` commands |
+| tmux | `fh_<feature>_<pane>` sessions | Hosts every Claude, service and shell process; the app attaches to them and nothing stops when it quits |
 | tmux config | `tmux/grove.tmux.conf` | The terminal-only front end (header in tmux's status line), used with `fh ui tmux` |
 
 State lives in `~/.claude/feature-hub/`: `features/*.json` (registry), `status/*.json` (per-session
@@ -56,6 +78,31 @@ The config is the repo's own **`.grove.json`** (commit it to share it with your 
 | `base`, `branchPrefix`, `worktrees` | Branch start point, branch naming (`{user}/`), where worktrees go |
 
 See [`examples/nextjs-fastapi.grove.json`](examples/nextjs-fastapi.grove.json).
+
+## Bringing in work that already exists
+
+| You have | Command | What happens |
+|---|---|---|
+| A worktree you made earlier | `grove adopt <worktree>…` | It becomes a feature: its own ports and env, a title from its PR, a ticket from its branch; services start stopped (`grove up <name>`) |
+| A Claude conversation in a main checkout (e.g. an iTerm tab) | `grove sessions`, then `grove adopt --session <id>…` | It appears under **Sessions**; its panel waits for you to `/exit` the old copy, then resumes it with its full history |
+
+Grove can't take over a running process, so a conversation moves by resuming it, and Grove refuses
+to start a second Claude on a worktree that already has one.
+
+## Commands
+
+| Command | Does |
+|---|---|
+| `grove ls` | Features, ports, labels, PR/CI, state, recap → next |
+| `grove new <name\|TICKET> [-p task]` | A new feature: worktree, ports, env, services, a briefed Claude |
+| `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations (above) |
+| `grove up\|down\|restart <name>` | Start, stop or restart a feature's services |
+| `grove rename <name> <title>` | The title shown in Grove |
+| `grove done <name>` · `grove clean [--yes]` | Close a feature (worktree kept) · remove merged, clean ones |
+| `grove doctor` | Check projects and features: files, deps, ports, env, labels |
+| `grove project add\|ls\|default\|show` | Manage projects |
+| `grove pr` · `grove findings <name>` | Refresh PR/CI · list unanswered review-bot findings |
+| `grove theme [palette]` · `grove ui app\|tmux` | Header palette · which front end new features open in |
 
 ## Install
 
