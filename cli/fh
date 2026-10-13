@@ -1052,6 +1052,12 @@ def cmd_statusline() -> None:
     here = next((f for f in regs if cwd == f["path"] or cwd.startswith(f["path"] + "/")), None)
     legacy = HOME / ".claude/statusline-feature.sh"
     if here is not None and ui_mode() == "app":
+        # the app's sidebar is the switcher: only what it doesn't show (and never empty, so Claude
+        # replaces whatever it showed before)
+        model = (data.get("model") or {}).get("display_name") or ""
+        cost = (data.get("cost") or {}).get("total_cost_usd")
+        bits = [model, f"${cost:.2f}" if isinstance(cost, (int, float)) else ""]
+        print("\033[38;5;245m" + (" · ".join(b for b in bits if b) or " ") + "\033[0m")
         return
     if here is None or not os.environ.get("TMUX"):
         if legacy.exists():
