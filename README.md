@@ -80,6 +80,11 @@ grove new csv-export                 # in or outside the repo; --project picks o
 The config is the repo's own **`.grove.json`** (commit it to share it with your team) merged under
 **`~/.grove/projects/<name>/project.json`** (yours; at least `{"repo": "~/code/my-repo"}`).
 
+Without a `.grove.json`, the starter config is a guess from the repo: a `dev` script in a
+`package.json` becomes a web service, a `main.py` or `manage.py` an API; Python envs (`.venv`, `venv`)
+are linked into each worktree, `node_modules` cloned, untracked `.env*` files copied, and the base
+branch follows `origin/HEAD`. Check it with `grove project show <name>`.
+
 | Key | What it does |
 |---|---|
 | `services` | Dev servers, each `{name, dir, run, ports: [lo, hi], reserved, key, hint, open}`. Every feature gets its own port per service; each service is a panel |
@@ -92,6 +97,18 @@ The config is the repo's own **`.grove.json`** (commit it to share it with your 
 See [`examples/nextjs-fastapi.grove.json`](examples/nextjs-fastapi.grove.json).
 
 ## Bringing in work that already exists
+
+The quickest way is one command per repo:
+
+```sh
+grove import ~/code/my-repo          # registers it if new; lists what is not in Grove yet
+grove import --project my-repo --yes # adopts all of it
+```
+
+It finds the repo's other git worktrees and the Claude conversations from its main checkout (last
+72 hours; `--hours` to change), and says which worktrees have uncommitted changes. Nothing is adopted
+without `--yes`, and anything already in Grove is skipped, so it is safe to re-run. Given a
+worktree instead of the main checkout, it registers the main checkout. Or pick one at a time:
 
 | You have | Command | What happens |
 |---|---|---|
@@ -107,7 +124,8 @@ to start a second Claude on a worktree that already has one.
 |---|---|
 | `grove ls` | Features, ports, labels, PR/CI, state, recap → next |
 | `grove new <name\|TICKET> [-p task]` | A new feature: worktree, ports, env, services, a briefed Claude |
-| `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations (above) |
+| `grove import [<repo>] [--yes]` | Register a repo and bring in its worktrees and recent conversations (above) |
+| `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations one at a time (above) |
 | `grove up\|down\|restart <name>` | Start, stop or restart a feature's services |
 | `grove rename <name> <title>` | The title shown in Grove |
 | `grove done <name> [--keep\|--force]` · `grove clean [--yes]` | Close a feature: removes its worktree, branch and state (notes and retro go to the project's `archive/`); stops if it has uncommitted or unmerged work unless `--force`, `--keep` keeps worktree and branch · close every merged, clean one |
@@ -123,12 +141,19 @@ to start a second Claude on a worktree that already has one.
 ## Install
 
 ```sh
-./install.sh                 # links cli/, mod/ and tmux/ into ~/.grove
-npm install
-npm run install-app          # builds Grove.app into /Applications
+./install.sh --app ~/code/my-repo
 ```
 
-Then add the settings lines `install.sh` prints, so every Claude session loads the mod.
+That one line:
+
+1. checks for `git`, `tmux`, `gh`, `claude` and `python3`, and says how to install any that are missing
+2. links `cli/`, `mod/` and `tmux/` into `~/.grove` and puts `grove` on your PATH (`~/.local/bin`)
+3. has every Claude Code session load the mod: it adds `env.CLAUDE_CODE_PLUGIN_DIRS` (and a status
+   line, if you have none) to `~/.claude/settings.json`, keeping a backup
+4. with `--app`, builds Grove.app into `/Applications`
+5. for each repo you name, runs `grove import` as a dry run (below)
+
+It is safe to re-run. Then restart running Claude sessions so they load the mod, and run `grove doctor`.
 
 ## Develop
 

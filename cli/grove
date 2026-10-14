@@ -9,6 +9,9 @@ per feature, for any project described by a project config (see `grove project`)
   grove adopt <worktree>…   register existing worktrees as features (services start stopped)
   grove sessions [--hours H]          recent Claude conversations in the main checkout, not yet in Grove
   grove adopt --session <id>…         bring those conversations into Grove (they resume there)
+  grove import [<repo>] [--project P] [--hours H] [--yes]
+                         register the repo if new, then list (--yes: adopt) its worktrees and recent
+                         Claude conversations that are not in Grove yet
   grove ls                  features, ports, servers, labels, PR/CI, session state
   grove go <name>           (tmux UI) switch to the feature's window
   grove up|down|restart <name>   start / stop / restart the feature's services
@@ -1632,6 +1635,13 @@ def cmd_doctor() -> None:
     for tool, fix in (("tmux", "brew install tmux"), ("gh", "brew install gh"), ("claude", ""), ("git", "")):
         if run(["which", tool]).returncode:
             warn(f"{tool} missing {fix}")
+    settings = read_json(HOME / ".claude/settings.json", {})
+    dirs = str((settings.get("env") or {}).get("CLAUDE_CODE_PLUGIN_DIRS", ""))
+    if not any(Path(os.path.expanduser(d)).resolve() == (HUB / "mod").resolve() for d in re.split(r"[:,]", dirs) if d):
+        warn(f"Claude sessions don't load the Grove mod: run ./install.sh, or set env.CLAUDE_CODE_PLUGIN_DIRS "
+             f"to {HUB / 'mod'} in ~/.claude/settings.json")
+    if not project_names():
+        warn("no projects yet: grove import ~/code/<repo>")
     for name in project_names():
         p = project(name)
         print(f"project {name}  ({p['repo']})")
@@ -1716,6 +1726,118 @@ def detect_services(repo: Path) -> list[dict]:
     return found
 
 
+def detect_setup(repo: Path) -> dict:
+    """A starter guess at preparing a worktree: link Python envs, clone node_modules, copy env files."""
+    dirs = [repo, *sorted(d for d in repo.iterdir() if d.is_dir() and not d.name.startswith("."))][:30]
+    setup = {"link": [], "clone": [], "copy": [], "run": []}
+    for d in dirs:
+        rel = "" if d == repo else d.name + "/"
+        setup["link"] += [rel + v for v in (".venv", "venv") if (d / v / "bin/python").exists()]
+        if (d / "node_modules").is_dir() and (d / "package.json").exists():
+            setup["clone"].append(rel + "node_modules")
+        tracked = set(run(["git", "-C", str(d), "ls-files", "--", ".env*"]).stdout.split())
+        setup["copy"] += [rel + e.name for e in sorted(d.glob(".env*"))
+                          if e.is_file() and e.name not in tracked and not e.name.endswith((".example", ".sample", ".template"))]
+    return setup
+
+
+def project_of_repo(repo: Path) -> str | None:
+    common = run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"]).stdout.strip()
+    return next((n for n in project_names() if common and (project(n)["repo"] / ".git").resolve() == expand(common)), None)
+
+
+def add_project(repo: Path, name: str | None = None) -> str | None:
+    """Register a repo (its main checkout, even when given one of its worktrees); returns the project's
+    name, or None when the repo is already registered."""
+    if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
+        die(f"{repo} is not a git repository")
+    if project_of_repo(repo):
+        return None
+    common = expand(run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"]).stdout.strip())
+    if common.name == ".git":
+        repo = common.parent  # the main checkout, not a worktree of it
+    name = name or re.sub(r"[^a-z0-9._-]+", "-", repo.name.lower())
+    if project_conf(name).exists():
+        die(f"project '{name}' exists (grove project show {name}); pick another with --name")
+    home = str(HOME.resolve())
+    mine = {"repo": "~" + str(repo)[len(home):] if str(repo).startswith(home + "/") else str(repo)}
+    head = run(["git", "-C", str(repo), "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"]).stdout.strip()
+    if head and head != "origin/main":
+        mine["base"] = head
+    if not (repo / ".grove.json").exists():
+        mine["services"] = detect_services(repo)
+        mine["setup"] = detect_setup(repo)
+        mine["_help"] = ("Grove project config — see `grove` docs: services, setup, env, labels, checks, agentNotes. "
+                         "Commit a .grove.json to the repo to share it; keys here override it.")
+    write_json(project_conf(name), mine)
+    cfg = read_json(CONFIG, {})
+    if not cfg.get("defaultProject"):
+        cfg["defaultProject"] = name
+        write_json(CONFIG, cfg)
+    print(f"project {name}: {repo} ({'.grove.json' if (repo / '.grove.json').exists() else 'starter config'}) "
+          f"→ edit {project_conf(name)}")
+    for key in ("services", "setup"):
+        if key in mine:
+            print(f"  {key}: {json.dumps(mine[key])}")
+    return name
+
+
+def loose_worktrees(p: dict) -> list[dict]:
+    """The repo's git worktrees that are not its main checkout and not yet features."""
+    out = run(["git", "-C", str(p["repo"]), "worktree", "list", "--porcelain"]).stdout
+    known = {f["path"] for f in features()}
+    rows = []
+    for block in out.strip().split("\n\n"):
+        kv = dict((line.split(" ", 1) + [""])[:2] for line in block.splitlines())
+        path = kv.get("worktree", "")
+        if (not path or expand(path) == p["repo"] or "bare" in kv or "prunable" in kv
+                or str(expand(path)) in known or path in known or not Path(path).is_dir()):
+            continue
+        dirty = bool(run(["git", "-C", path, "status", "--porcelain"]).stdout.strip())
+        rows.append({"path": path, "branch": kv.get("branch", "").removeprefix("refs/heads/") or "(detached)",
+                     "dirty": dirty})
+    return rows
+
+
+def cmd_import(args: list[str]) -> None:
+    """Bring a repo and the work already in flight on it into Grove: register the project if needed,
+    then list (or, with --yes, adopt) its existing worktrees and its recent Claude conversations in
+    the main checkout. Safe to re-run: anything already in Grove is skipped."""
+    hours = float(args[args.index("--hours") + 1]) if "--hours" in args else 72
+    proj = args[args.index("--project") + 1] if "--project" in args else None
+    yes = "--yes" in args
+    flags = {"--hours", "--project"}
+    paths = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or args[i - 1] not in flags)]
+    if paths:
+        repo = expand(paths[0])
+        proj = proj or add_project(repo) or project_of_repo(repo)
+    p = project(proj or project_here() or default_project())
+    trees, chats = loose_worktrees(p), recent_sessions(p, hours)
+    print(f"\nproject {p['name']}  ({p['repo']})")
+    print(f"  worktrees not in Grove: {len(trees) or 'none'}")
+    for t in trees:
+        print(f"    {t['path']}  [{t['branch']}]{'  (uncommitted changes)' if t['dirty'] else ''}")
+    print(f"  Claude conversations in the main checkout, last {hours:g}h: {len(chats) or 'none'}")
+    for c in chats:
+        rel = c["cwd"][len(str(p["repo"])):].lstrip("/") or "."
+        print(f"    {c['id'][:8]}  {time.strftime('%m-%d %H:%M', time.localtime(c['mtime']))}  {rel:<12} "
+              f"{c['title'] or '(untitled)'}")
+    if not trees and not chats:
+        print("\nNothing to bring in. Start a feature: grove new <name>")
+        return
+    if not yes:
+        print(f"\nNo features adopted yet. To bring all of it in: grove import --project {p['name']} --yes"
+              + (f" --hours {hours:g}" if "--hours" in args else ""))
+        print("Or pick: grove adopt <worktree>…   ·   grove adopt --session <id>…  (ids: grove sessions)")
+        return
+    if trees:
+        cmd_adopt([t["path"] for t in trees] + ["--project", p["name"]])
+    for c in chats:
+        adopt_session(c["id"], None)
+    if chats:
+        print("Each conversation resumes in Grove once you /exit it where it is running now.")
+
+
 def cmd_project(rest: list[str]) -> None:
     sub = rest[0] if rest else "ls"
     if sub == "ls":
@@ -1729,24 +1851,9 @@ def cmd_project(rest: list[str]) -> None:
     elif sub == "add":
         if len(rest) < 2:
             die("project add <repo> [--name N]")
-        repo = expand(rest[1])
-        if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
-            die(f"{repo} is not a git repository")
-        name = rest[rest.index("--name") + 1] if "--name" in rest else repo.name.lower()
-        if project_conf(name).exists():
-            die(f"project '{name}' exists (grove project show {name})")
-        mine = {"repo": str(repo).replace(str(HOME), "~")}
-        if not (repo / ".grove.json").exists():
-            mine["services"] = detect_services(repo)
-            mine["_help"] = ("Grove project config — see `grove` docs: services, setup, env, labels, checks, agentNotes. "
-                             "Commit a .grove.json to the repo to share it; keys here override it.")
-        write_json(project_conf(name), mine)
-        cfg = read_json(CONFIG, {})
-        if not cfg.get("defaultProject"):
-            cfg["defaultProject"] = name
-            write_json(CONFIG, cfg)
-        print(f"project {name}: {repo} ({'.grove.json' if (repo / '.grove.json').exists() else 'starter config'}) "
-              f"→ edit {project_conf(name)}")
+        name = add_project(expand(rest[1]), rest[rest.index("--name") + 1] if "--name" in rest else None)
+        if name is None:
+            die(f"{expand(rest[1])} is already project '{project_of_repo(expand(rest[1]))}'")
     elif sub == "default":
         if len(rest) < 2 or rest[1] not in project_names():
             die(f"project default <name> (projects: {', '.join(project_names())})")
@@ -1838,6 +1945,8 @@ def main(argv: list[str]) -> None:
         cmd_adopt(rest)
     elif cmd == "sessions":
         cmd_sessions(rest)
+    elif cmd in ("import", "onboard"):
+        cmd_import(rest)
     elif cmd == "go":
         need(1, "go <name>")
         f = feature(rest[0])
