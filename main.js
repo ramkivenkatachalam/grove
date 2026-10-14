@@ -148,11 +148,13 @@ function closeTerminalsOf(contents) {
   }
 }
 
-function openProject(project) {
+// review=true opens the project on its "bring in your work" sheet
+function openProject(project, { review = false } = {}) {
   const existing = windows.get(project)
   if (existing && !existing.isDestroyed()) {
     existing.show()
     existing.focus()
+    if (review) existing.webContents.send('menu', 'import')
     return existing
   }
   const win = new BrowserWindow({
@@ -168,7 +170,7 @@ function openProject(project) {
   })
   windows.set(project, win)
   rememberOpen()
-  win.loadFile(path.join(__dirname, 'renderer/index.html'), { query: { project: project || '' } })
+  win.loadFile(path.join(__dirname, 'renderer/index.html'), { query: { project: project || '', review: review ? '1' : '' } })
   win.on('page-title-updated', (e) => e.preventDefault()) // keep "<project> — Grove"
   const contents = win.webContents
   // a reload starts a new page: detach its old terminals (their tmux sessions keep running)
@@ -189,21 +191,35 @@ function openProject(project) {
   return win
 }
 
+// a repo becomes a project (or, if it already is one, opens), then shows what is already in flight on it
 async function addProject(parent) {
   const { canceled, filePaths } = await dialog.showOpenDialog(parent, {
-    title: 'Add a project to Grove', message: 'Choose the main checkout of a git repository',
+    title: 'Add a project to Grove', message: 'Choose a git repository (its main checkout or any of its worktrees)',
     properties: ['openDirectory'], buttonLabel: 'Add Project',
   })
   if (canceled || !filePaths[0]) return null
-  const result = await grove(['project', 'add', filePaths[0]])
-  if (result.code) {
+  const result = await grove(['import', filePaths[0], '--json'])
+  let found = null
+  try { found = JSON.parse(result.stdout) } catch {}
+  if (result.code || !found) {
     dialog.showMessageBox(parent, { type: 'warning', message: 'Could not add the project', detail: (result.stderr || result.stdout).trim() })
     return null
   }
-  const name = (result.stdout.match(/^project (\S+):/) || [])[1]
   sendState()
-  if (name) openProject(name)
-  return name
+  const blank = windows.get(null) // the "add a project to begin" window has done its job
+  openProject(found.project, { review: true })
+  if (blank && !blank.isDestroyed()) blank.close()
+  return found.project
+}
+
+async function scanProject(project) {
+  if (!projects().some((p) => p.name === project)) return { error: `no project ${project}` }
+  const result = await grove(['import', '--project', project, '--json'])
+  try {
+    return JSON.parse(result.stdout)
+  } catch {
+    return { error: (result.stderr || result.stdout).trim() || 'could not look for work outside Grove' }
+  }
 }
 
 // ---- terminals (each belongs to the window that opened it) ----
@@ -288,6 +304,11 @@ ipcMain.on('open', (_e, url) => {
   if (/^https?:\/\//.test(url)) shell.openExternal(url)
 })
 ipcMain.on('open-project', (_e, name) => openProject(name))
+ipcMain.handle('import:scan', (_e, project) => scanProject(project))
+// the project's own config file, in the default editor
+ipcMain.on('open-config', (_e, project) => {
+  if (projects().some((p) => p.name === project)) shell.openPath(path.join(PROJECTS, project, 'project.json'))
+})
 ipcMain.handle('add-project', (e) => addProject(windowOf(e)))
 ipcMain.handle('project-menu', (e, current) => new Promise((resolve) => {
   const items = [
@@ -353,6 +374,7 @@ function buildMenu() {
       submenu: [
         { label: 'Open Project', submenu: openItems.length ? openItems : [{ label: 'No projects yet', enabled: false }] },
         { label: 'Add Project…', accelerator: 'CmdOrCtrl+Shift+O', click: () => addProject(BrowserWindow.getFocusedWindow()) },
+        { label: 'Bring In Existing Work…', accelerator: 'CmdOrCtrl+Shift+I', click: send('import') },
       ],
     },
     {
@@ -389,7 +411,8 @@ function openRemembered() {
   const known = new Set(projects().map((p) => p.name))
   const remembered = readJSON(OPEN_FILE(), []).filter((name) => known.has(name))
   const start = process.env.GROVE_PROJECT ? [process.env.GROVE_PROJECT] : remembered.length ? remembered : [defaultProject()]
-  for (const name of start) openProject(name)
+  // GROVE_REVIEW=1 opens as if the project had just been added (scripts/try-onboarding.sh app --added)
+  for (const name of start) openProject(name, { review: process.env.GROVE_REVIEW === '1' })
 }
 
 app.whenReady().then(async () => {

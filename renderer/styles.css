@@ -157,3 +157,41 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .scratch-to select { background: #262626; color: var(--text); border: 1px solid #3a3a3a; border-radius: 5px; padding: 3px 6px; font: inherit; max-width: 280px; }
 .scratch-to select:focus-visible { outline: 2px solid #ffffff; outline-offset: 1px; }
 .newcard textarea { background: #141414; color: var(--text); border: 1px solid #333333; border-radius: 5px; padding: 5px 8px; font: inherit; resize: vertical; }
+
+/* bringing in work already in flight: the review sheet and the sidebar note */
+.nudge { margin: 6px 10px; border: 1px solid #3a3a3a; background: #1e1e1e; color: var(--text); border-radius: 6px; padding: 6px 8px; cursor: pointer; text-align: left; font-size: 12px; display: flex; gap: 6px; align-items: baseline; }
+.nudge b { margin-left: auto; color: var(--accent); }
+.nudge:hover { border-color: var(--name); }
+.empty-actions { display: flex; gap: 8px; }
+.sheet-back { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: flex; align-items: flex-start; justify-content: center; padding-top: 7vh; z-index: 40; }
+.sheet { width: min(780px, 92vw); max-height: 84vh; overflow-y: auto; background: #1a1a1a; border: 1px solid #3a3a3a; border-radius: 10px; padding: 20px 22px 18px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5); }
+.sheet h1 { margin: 0; font-size: 18px; color: #ffffff; }
+.sheet h2 { margin: 8px 0 0; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
+.sheet h2 span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text-3); margin-left: 8px; }
+.sheet-sub { margin: 0; color: var(--text-2); }
+.sheet code, .setup code { font: 12px var(--mono); color: var(--text); }
+.picks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.pick { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid #2c2c2c; border-radius: 7px; cursor: pointer; }
+.pick.on { border-color: #4a4a4a; background: #202020; }
+.pick input { margin-top: 3px; accent-color: var(--name); }
+.pick input:focus-visible { outline: 2px solid #ffffff; outline-offset: 2px; }
+.pick-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pick-title { color: var(--text); font-weight: 600; }
+.pick:not(.on) .pick-title { color: var(--text-2); font-weight: 400; }
+.pick-sub { color: var(--text-3); font: 11px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.tag { border: 1px solid #444444; color: var(--text-2); border-radius: 4px; padding: 0 6px; font: 11px/1.6 var(--mono); white-space: nowrap; }
+.tag.warn { border-color: var(--waiting); color: var(--waiting); }
+.tag.ok { border-color: var(--ready); color: var(--ready); }
+.tag.bad { border-color: #ff8f8f; color: #ff9b9b; white-space: normal; max-width: 260px; }
+.tag.busy { font-style: italic; }
+.hint { margin: 0; color: var(--text-3); font-size: 12px; }
+.hint a { color: var(--name); cursor: pointer; text-decoration: underline; }
+.setup { border-top: 1px solid #2a2a2a; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.setup summary { cursor: pointer; display: flex; gap: 10px; align-items: baseline; color: var(--text-2); }
+.setup summary b { color: var(--accent); font-size: 13px; }
+.setup summary:focus-visible { outline: 2px solid #ffffff; outline-offset: 2px; }
+.setup .facts-list { margin: 8px 0; }
+.sheet-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.sheet-actions .btn { padding: 6px 12px; }
+.sheet-error { color: #ff9b9b; font-size: 12px; }

@@ -98,17 +98,32 @@ See [`examples/nextjs-fastapi.grove.json`](examples/nextjs-fastapi.grove.json).
 
 ## Bringing in work that already exists
 
-The quickest way is one command per repo:
+In the app: **Add project** (⌘⇧O) and choose the repo — its main checkout or any of its worktrees.
+Grove registers it and shows what is already in flight on it:
+
+- **Worktrees** of the repo that Grove isn't running, newest first, each with what makes it worth
+  bringing in: uncommitted changes, commits ahead of the base branch, its latest Claude conversation.
+  Ones with nothing new for three weeks start unticked.
+- **Claude conversations** from the main checkout in the last 72 hours (e.g. an iTerm tab).
+- **How Grove will run them**: the services, ports and setup it guessed (or read from `.grove.json`),
+  with a link to fix `project.json` first.
+
+Tick what you want and **Bring in** (⌘↩). Each worktree becomes a feature with its own ports and Claude
+session, named after its PR or its Claude conversation; your code and branch stay as they are. Each
+conversation moves under **Sessions** and resumes with its full history once you `/exit` the old copy.
+
+Later, when a worktree or conversation shows up outside Grove (made in a terminal out of habit), the
+sidebar says so ("2 in progress outside Grove · Review"); **Project › Bring In Existing Work…** (⌘⇧I)
+opens the same review. What you leave unticked stops being mentioned.
+
+From a terminal, the same thing:
 
 ```sh
-grove import ~/code/my-repo          # registers it if new; lists what is not in Grove yet
-grove import --project my-repo --yes # adopts all of it
+grove import ~/code/my-repo          # registers it if new; lists what is not in Grove yet (--json for tools)
+grove import --project my-repo --yes # brings in all of it
 ```
 
-It finds the repo's other git worktrees and the Claude conversations from its main checkout (last
-72 hours; `--hours` to change), and says which worktrees have uncommitted changes. Nothing is adopted
-without `--yes`, and anything already in Grove is skipped, so it is safe to re-run. Given a
-worktree instead of the main checkout, it registers the main checkout. Or pick one at a time:
+Or one at a time:
 
 | You have | Command | What happens |
 |---|---|---|
@@ -174,9 +189,9 @@ It is safe to re-run. Then restart running Claude sessions so they load the mod,
 | Screenshot the app (visual checks) | `GROVE_SCREENSHOT=/tmp/grove.png npx electron .` |
 | Validate / test the mod | `claude plugin validate mod && claude plugin test mod` |
 | Test onboarding end to end (fake home, sample repo; touches nothing real) | `scripts/try-onboarding.sh check` |
-| Click through onboarding in the app, as a new user | `scripts/try-onboarding.sh app` (or `app --imported`), then `… clean` |
+| Click through onboarding in the app, as a new user | `scripts/try-onboarding.sh app` (`--added`: the review sheet; `--imported`; `--demo`: with Claude conversations), then `… clean` |
 
 ## Keys
 
-⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
+⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘⇧I bring in existing work · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
 ⌘⇧R restart servers · right-click a feature for more · ⌥-drag selects text inside a terminal.

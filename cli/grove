@@ -9,7 +9,7 @@ per feature, for any project described by a project config (see `grove project`)
   grove adopt <worktree>…   register existing worktrees as features (services start stopped)
   grove sessions [--hours H]          recent Claude conversations in the main checkout, not yet in Grove
   grove adopt --session <id>…         bring those conversations into Grove (they resume there)
-  grove import [<repo>] [--project P] [--hours H] [--yes]
+  grove import [<repo>] [--project P] [--hours H] [--yes|--json]
                          register the repo if new, then list (--yes: adopt) its worktrees and recent
                          Claude conversations that are not in Grove yet
   grove ls                  features, ports, servers, labels, PR/CI, session state
@@ -963,7 +963,8 @@ def cmd_adopt(args: list[str]) -> None:
             assigned[svc["name"]] = alloc(svc, taken | set(assigned.values()))
         f = {"name": fname, "project": p["name"], "path": str(wt), "branch": branch, "ports": assigned,
              "ticket": m.group(1).upper() if m else None,
-             "title": title if title and len(paths) == 1 else tidy_title(pr_title) or tail.replace("-", " ").strip().capitalize(),
+             "title": title if title and len(paths) == 1 else tidy_title(pr_title) or (worktree_conversation(str(wt)) or {}).get("title")
+             or tail.replace("-", " ").strip().capitalize(),
              "adopted": True, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
         f["links"] = {svc["name"]: fill(svc["open"], f, assigned[svc["name"]]) for svc in services(p) if svc.get("open")}
         if p.get("agentNotes"):
@@ -1746,9 +1747,9 @@ def project_of_repo(repo: Path) -> str | None:
     return next((n for n in project_names() if common and (project(n)["repo"] / ".git").resolve() == expand(common)), None)
 
 
-def add_project(repo: Path, name: str | None = None) -> str | None:
+def add_project(repo: Path, name: str | None = None, out=sys.stdout) -> str | None:
     """Register a repo (its main checkout, even when given one of its worktrees); returns the project's
-    name, or None when the repo is already registered."""
+    name, or None when the repo is already registered. Says what it wrote on `out`."""
     if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
         die(f"{repo} is not a git repository")
     if project_of_repo(repo):
@@ -1775,17 +1776,33 @@ def add_project(repo: Path, name: str | None = None) -> str | None:
         cfg["defaultProject"] = name
         write_json(CONFIG, cfg)
     print(f"project {name}: {repo} ({'.grove.json' if (repo / '.grove.json').exists() else 'starter config'}) "
-          f"→ edit {project_conf(name)}")
+          f"→ edit {project_conf(name)}", file=out)
     for key in ("services", "setup"):
         if key in mine:
-            print(f"  {key}: {json.dumps(mine[key])}")
+            print(f"  {key}: {json.dumps(mine[key])}", file=out)
     return name
 
 
+def worktree_conversation(path: str) -> dict | None:
+    """The latest Claude conversation started in a worktree (or below it): {id, title, at}."""
+    files = sorted((t for folder in TRANSCRIPTS.glob(mangle(path) + "*") for t in folder.glob("*.jsonl")),
+                   key=lambda t: -t.stat().st_mtime)
+    for t in files[:8]:
+        info = transcript_info(t)
+        if info["cwd"] == path or info["cwd"].startswith(path + "/"):
+            return {"id": info["id"], "title": info["title"], "at": info["mtime"]}
+    return None
+
+
 def loose_worktrees(p: dict) -> list[dict]:
-    """The repo's git worktrees that are not its main checkout and not yet features."""
+    """The repo's git worktrees that are not its main checkout and not yet features, most recently
+    active first: branch, uncommitted changes, commits ahead of the base, last commit, and the
+    latest Claude conversation started there."""
     out = run(["git", "-C", str(p["repo"]), "worktree", "list", "--porcelain"]).stdout
     known = {f["path"] for f in features()}
+    base = p.get("base") or "origin/main"
+    if run(["git", "-C", str(p["repo"]), "rev-parse", "-q", "--verify", base]).returncode:
+        base = None
     rows = []
     for block in out.strip().split("\n\n"):
         kv = dict((line.split(" ", 1) + [""])[:2] for line in block.splitlines())
@@ -1794,9 +1811,22 @@ def loose_worktrees(p: dict) -> list[dict]:
                 or str(expand(path)) in known or path in known or not Path(path).is_dir()):
             continue
         dirty = bool(run(["git", "-C", path, "status", "--porcelain"]).stdout.strip())
+        ahead = run(["git", "-C", path, "rev-list", "--count", f"{base}..HEAD"]).stdout.strip() if base else ""
+        committed = run(["git", "-C", path, "log", "-1", "--format=%ct"]).stdout.strip()
+        chat = worktree_conversation(path)
+        at = max([float(committed or 0), chat["at"] if chat else 0])
         rows.append({"path": path, "branch": kv.get("branch", "").removeprefix("refs/heads/") or "(detached)",
-                     "dirty": dirty})
-    return rows
+                     "dirty": dirty, "ahead": int(ahead) if ahead.isdigit() else None, "at": at, "conversation": chat})
+    return sorted(rows, key=lambda r: -r["at"])
+
+
+def config_summary(p: dict) -> dict:
+    """How Grove will run the project's features, for people to check before bringing work in."""
+    return {"source": ".grove.json" if (p["repo"] / ".grove.json").exists() else "starter",
+            "file": str(project_conf(p["name"])), "base": p.get("base"),
+            "services": [{"name": s["name"], "dir": s.get("dir", ""), "run": s.get("run", ""), "ports": s.get("ports")}
+                         for s in services(p)],
+            "setup": {k: v for k, v in p["setup"].items() if v}}
 
 
 def cmd_import(args: list[str]) -> None:
@@ -1805,14 +1835,23 @@ def cmd_import(args: list[str]) -> None:
     the main checkout. Safe to re-run: anything already in Grove is skipped."""
     hours = float(args[args.index("--hours") + 1]) if "--hours" in args else 72
     proj = args[args.index("--project") + 1] if "--project" in args else None
-    yes = "--yes" in args
+    yes, as_json = "--yes" in args, "--json" in args
     flags = {"--hours", "--project"}
     paths = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or args[i - 1] not in flags)]
+    added = None
     if paths:
         repo = expand(paths[0])
-        proj = proj or add_project(repo) or project_of_repo(repo)
+        added = None if proj else add_project(repo, out=sys.stderr if as_json else sys.stdout)
+        proj = proj or added or project_of_repo(repo)
     p = project(proj or project_here() or default_project())
     trees, chats = loose_worktrees(p), recent_sessions(p, hours)
+    if as_json:  # for the app: what is there to bring in, and how features will run
+        print(json.dumps({
+            "project": p["name"], "repo": str(p["repo"]), "added": bool(added), "config": config_summary(p),
+            "worktrees": trees,
+            "sessions": [{"id": c["id"], "title": c["title"], "at": c["mtime"], "branch": c["branch"],
+                          "folder": c["cwd"][len(str(p["repo"])):].lstrip("/") or ""} for c in chats]}))
+        return
     print(f"\nproject {p['name']}  ({p['repo']})")
     print(f"  worktrees not in Grove: {len(trees) or 'none'}")
     for t in trees:
