@@ -1644,7 +1644,9 @@ def cmd_doctor() -> None:
             warn(f"{tool} missing {fix}")
     settings = read_json(HOME / ".claude/settings.json", {})
     dirs = str((settings.get("env") or {}).get("CLAUDE_CODE_PLUGIN_DIRS", ""))
-    if not any(Path(os.path.expanduser(d)).resolve() == (HUB / "mod").resolve() for d in re.split(r"[:,]", dirs) if d):
+    # any listed folder that is the Grove mod counts (the hub's link, or a clone's mod/ directly)
+    if not any(read_json(Path(os.path.expanduser(d)) / ".claude-plugin/plugin.json", {}).get("name") == "grove"
+               for d in dirs.split(":") if d):
         warn(f"Claude sessions don't load the Grove mod: run ./install.sh, or set env.CLAUDE_CODE_PLUGIN_DIRS "
              f"to {HUB / 'mod'} in ~/.claude/settings.json")
     if not project_names():
