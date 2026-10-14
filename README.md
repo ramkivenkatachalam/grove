@@ -110,7 +110,7 @@ to start a second Claude on a worktree that already has one.
 | `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations (above) |
 | `grove up\|down\|restart <name>` | Start, stop or restart a feature's services |
 | `grove rename <name> <title>` | The title shown in Grove |
-| `grove done <name>` · `grove clean [--yes]` | Close a feature (worktree kept) · remove merged, clean ones |
+| `grove done <name> [--keep\|--force]` · `grove clean [--yes]` | Close a feature: removes its worktree, branch and state (notes and retro go to the project's `archive/`); stops if it has uncommitted or unmerged work unless `--force`, `--keep` keeps worktree and branch · close every merged, clean one |
 | `grove doctor` | Check projects and features: files, deps, ports, env, labels |
 | `grove project add\|ls\|default\|show` | Manage projects |
 | `grove pr` · `grove findings <name>` | Refresh PR/CI · list unanswered review-bot findings |

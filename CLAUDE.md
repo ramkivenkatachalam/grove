@@ -15,7 +15,8 @@ one git worktree per feature. README.md is the user-facing description; this fil
 Runtime state, never in git: `~/.grove/` — one folder per project, `projects/<p>/project.json`
 (per-project config; Numos's is private there), and in it one folder per feature, `projects/<p>/<f>/`
 with `feature.json` (registry), `status.json` (written by the mod), `brief.md` and `worktree/` (the git
-worktree, or a link to one made before this layout). At the top: `prs.json`, `feedback.json`, `theme.json`,
+worktree, or a link to one made before this layout). `fh done` deletes a feature's folder, keeping its
+notes and retro in `projects/<p>/archive/<f>/`. At the top: `prs.json`, `feedback.json`, `theme.json`,
 `config.json` (`ui: app|tmux`, `defaultProject`), `focus.json`. Feature names are unique across projects
 (tmux sessions are named by them). The app's file watcher ignores everything under `worktree/`.
 

@@ -421,7 +421,7 @@ function RetroSection({ f, say }) {
   const sections = useMemo(() => parseRetro(text), [text])
   useEffect(() => setEditing(false), [f.name])
   const draft = async () => {
-    if (text.trim() && !(await hub.confirm('Draft the retro again?', 'The current one is kept as retro.prev.md beside it.'))) return
+    if (text.trim() && !(await hub.confirm('Draft the retro again?', 'The current one is kept as retro.prev.md beside it.', 'Draft again'))) return
     setBusy(true)
     const r = await hub.fh(['retro', f.name])
     setBusy(false)
@@ -687,8 +687,20 @@ function App() {
     if (choice?.startsWith('open:')) hub.open(choice.slice(5))
     if (choice === 'open-pr') hub.open(feat.pr.url)
     if (choice === 'reveal') hub.reveal(feat.path)
-    if (choice === 'done' && (await hub.confirm(`Close ${feat.title}?`, 'Stops its servers and Claude session and removes it from the list. The worktree and branch are kept.'))) {
-      const r = await hub.fh(['done', feat.name])
+    if (choice === 'done') {
+      // a merged, committed feature just goes; anything that might lose work asks first
+      const c = await hub.fh(['done', feat.name, '--check'])
+      let why = []
+      try { why = JSON.parse(c.stdout).reasons || [] } catch { why = [(c.stderr || 'could not check it').trim()] }
+      const args = ['done', feat.name]
+      if (why.length) {
+        const pick = await hub.ask(`${feat.title} may not be finished`,
+          `${why.map((w) => `• ${w}`).join('\n')}\n\nDelete anyway removes its worktree, branch (with any unmerged commits), servers and Claude session. Notes and retro are kept in the project's archive.`,
+          ['Delete anyway', 'Close, keep worktree and branch', 'Cancel'])
+        if (pick === 2) return
+        args.push(pick === 0 ? '--force' : '--keep')
+      }
+      const r = await hub.fh(args)
       say((r.stdout || r.stderr).trim(), Boolean(r.code))
       setHosted((h) => ({ ...h, [feat.name]: undefined }))
     }

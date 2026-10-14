@@ -14,7 +14,8 @@ contextBridge.exposeInMainWorld('hub', {
   projectMenu: (current) => ipcRenderer.invoke('project-menu', current),
   openProject: (name) => ipcRenderer.send('open-project', name),
   addProject: () => ipcRenderer.invoke('add-project'),
-  confirm: (message, detail) => ipcRenderer.invoke('confirm', message, detail),
+  confirm: (message, detail, ok) => ipcRenderer.invoke('confirm', message, detail, ok),
+  ask: (message, detail, buttons) => ipcRenderer.invoke('ask', message, detail, buttons),
   doc: {
     read: (kind, name) => ipcRenderer.invoke('doc:read', kind, name),
     write: (kind, name, text) => ipcRenderer.invoke('doc:write', kind, name, text),

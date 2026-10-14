@@ -15,7 +15,8 @@ per feature, for any project described by a project config (see `fh project`).
   fh pr [--force]        refresh the PR/CI cache (gh), at most every 3 minutes unless forced
   fh findings <name> [--brief] [--mark]   unanswered claude[bot]/Copilot review comments
   fh clean [--yes]       list (or remove) features whose PR merged and whose tree is clean
-  fh done <name>         stop everything and unregister; the worktree is kept
+  fh done <name>         close it: remove servers, sessions, worktree, branch, state (notes and retro archived);
+                         asks for --force if it has uncommitted or unmerged work; --keep keeps worktree and branch
   fh migrate             move an older hub to one folder per project and feature (safe to re-run)
   fh doctor              check projects and features: files, deps, ports, env, labels
   fh keepawake [--status|off|on]   keep the Mac awake while any agent is working (Claude
@@ -1482,24 +1483,85 @@ def merged_and_clean(f: dict) -> str | None:
     return f"#{pr['number']} merged"
 
 
-def cmd_done(name: str, remove: bool = False) -> None:
+def unfinished(f: dict) -> list[str]:
+    """Why closing a feature could lose work. Empty when it is committed, merged and has no open PR."""
+    path = f["path"]
+    if f.get("kind") == "session" or not Path(path).is_dir():
+        return []  # an adopted session's folder isn't Grove's to remove; a missing worktree has nothing to lose
+    why = []
+    dirty = run(["git", "-C", path, "status", "--porcelain"]).stdout.splitlines()
+    if dirty:
+        why.append(f"{len(dirty)} uncommitted change{'s' if len(dirty) != 1 else ''}")
+    base = project_of(f).get("base") or "origin/main"
+    local = base.split("/", 1)[1] if base.startswith("origin/") else base
+    heads = [b for b in dict.fromkeys((base, local)) if not run(["git", "-C", path, "rev-parse", "-q", "--verify", b]).returncode]
+    # merged = every commit is on the base (local or remote), or its PR merged (squash merges leave the commits behind)
+    ahead = int(run(["git", "-C", path, "rev-list", "--count", "HEAD", "--not", *heads]).stdout.strip() or 0) if heads else -1
+    pr = pr_for(f) if ahead else None
+    if ahead and not (pr and pr["state"] == "MERGED"):
+        pr = pr_sync().get("byBranch", {}).get(f["branch"])
+    if pr and pr["state"] == "OPEN":
+        why.append(f"pull request #{pr['number']} is still open")
+    elif ahead and not (pr and pr["state"] == "MERGED"):
+        why.append(f"{ahead} commit{'s' if ahead != 1 else ''} not merged into {local}" if ahead > 0 else f"no {base} to compare with")
+    return why
+
+
+def archive(f: dict, home: Path) -> list[str]:
+    """Keep what you wrote (scratchpad notes, the retro) in the project's archive/<feature>/; the rest is state."""
+    kept = [leaf for leaf in ("notes.md", "retro.md") if (home / leaf).is_file() and (home / leaf).read_text().strip()]
+    if kept:
+        dest = PROJECTS / (f.get("project") or default_project()) / "archive" / f["name"]
+        if dest.exists():
+            dest = dest.with_name(f"{f['name']}-{time.strftime('%Y%m%d-%H%M%S')}")
+        dest.mkdir(parents=True)
+        for leaf in kept:
+            shutil.move(str(home / leaf), dest / leaf)
+    return kept
+
+
+def cmd_done(name: str, keep: bool = False, force: bool = False, check: bool = False) -> None:
+    """Close a feature. By default everything goes: servers, sessions, worktree, branch and its folder (notes
+    and retro are archived). If it may not be finished, refuse unless --force; --keep keeps worktree and branch."""
     f = feature(name)
+    why = [] if keep else unfinished(f)
+    if check:
+        print(json.dumps({"reasons": why}))
+        return
+    if why and not force:
+        print(f"fh: {name} may not be finished: {'; '.join(why)}.\n"
+              f"  fh done {name} --force   remove it anyway (unmerged work is lost)\n"
+              f"  fh done {name} --keep    close it, keep the worktree and branch", file=sys.stderr)
+        sys.exit(3)
     panes = layout(f) if f.get("project") or project_names() else []
     for port in ports(f).values():
         stop_port(port)
     home = feature_dir(f)
-    for leaf in ("feature.json", "status.json", "brief.md"):
-        (home / leaf).unlink(missing_ok=True)
-    if (home / "worktree").is_symlink():
-        (home / "worktree").unlink()
-    if remove:
-        repo = project_of(f)["repo"]
-        r = run(["git", "-C", str(repo), "worktree", "remove", f["path"]])
-        print(f"{name}: closed and worktree removed" if r.returncode == 0 else f"{name}: closed; {r.stderr.strip()}")
+    if keep or f.get("kind") == "session":
+        for leaf in ("feature.json", "status.json", "brief.md"):
+            (home / leaf).unlink(missing_ok=True)
+        if (home / "worktree").is_symlink():
+            (home / "worktree").unlink()
+        if home.is_dir() and not any(home.iterdir()):
+            home.rmdir()
+        print(f"{name}: closed. Worktree kept at {f['path']}" if f.get("kind") != "session" else f"{name}: closed")
     else:
-        print(f"{name}: closed. Worktree kept at {f['path']}")
-    if home.is_dir() and not any(home.iterdir()):
-        home.rmdir()
+        repo = project_of(f)["repo"]
+        wt = Path(f["path"])
+        if wt.exists():
+            r = run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)])
+            if r.returncode:
+                die(f"{name}: could not remove the worktree, nothing else was removed: {r.stderr.strip()}")
+        run(["git", "-C", str(repo), "worktree", "prune"])
+        gone = []
+        if f.get("branch") and not run(["git", "-C", str(repo), "branch", "-D", f["branch"]]).returncode:
+            gone.append(f"branch {f['branch']}")
+        kept = archive(f, home)
+        if (home / "worktree").exists() and not (home / "worktree").is_symlink():
+            die(f"{name}: {home / 'worktree'} is still there; left {home} in place")
+        shutil.rmtree(home, ignore_errors=True)
+        note = f"; kept {' and '.join(kept)} in {home.parent / 'archive' / name}" if kept else ""
+        print(f"{name}: closed, removed worktree{', ' + ', '.join(gone) if gone else ''} and its state{note}")
     for row in owned_panes(name):
         if row["session"] == PARK:
             tmux("kill-pane", "-t", row["id"])
@@ -1517,9 +1579,9 @@ def cmd_clean(yes: bool) -> None:
         return
     for f, why in done:
         if yes:
-            cmd_done(f["name"], remove=True)
+            cmd_done(f["name"], force=True)  # merged and clean already
         else:
-            print(f"{f['name']:<26} {why}  — fh clean --yes removes it (branch kept)")
+            print(f"{f['name']:<26} {why}  — fh clean --yes removes its worktree, branch and state")
 
 
 def cmd_doctor() -> None:
@@ -1766,8 +1828,8 @@ def main(argv: list[str]) -> None:
     elif cmd == "clean":
         cmd_clean("--yes" in rest)
     elif cmd == "done":
-        need(1, "done <name>")
-        cmd_done(rest[0])
+        need(1, "done <name> [--keep|--force|--check]")
+        cmd_done(rest[0], keep="--keep" in rest, force="--force" in rest, check="--check" in rest)
     elif cmd == "host":
         need(1, "host <name>")
         print(json.dumps(host(feature(rest[0]))))

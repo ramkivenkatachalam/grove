@@ -307,7 +307,7 @@ ipcMain.handle('row-menu', (e, feature) => new Promise((resolve) => {
     ...(feature.prUrl ? [{ label: 'Open pull request', click: () => resolve('open-pr') }] : []),
     { label: 'Reveal worktree in Finder', click: () => resolve('reveal') },
     { type: 'separator' },
-    { label: 'Close feature…', click: () => resolve('done') },
+    { label: 'Close feature', click: () => resolve('done') },
   ]
   Menu.buildFromTemplate(items).popup({ window: windowOf(e), callback: () => resolve(null) })
 }))
@@ -322,9 +322,15 @@ ipcMain.handle('selection-menu', (e, { picked, editable }) => new Promise((resol
   Menu.buildFromTemplate(items).popup({ window: windowOf(e), callback: () => resolve(null) })
 }))
 ipcMain.on('reveal', (_e, dir) => shell.showItemInFolder(dir))
-ipcMain.handle('confirm', async (e, message, detail) => {
-  const { response } = await dialog.showMessageBox(windowOf(e), { type: 'question', buttons: ['Close feature', 'Cancel'], defaultId: 1, cancelId: 1, message, detail })
+ipcMain.handle('confirm', async (e, message, detail, ok = 'OK') => {
+  const { response } = await dialog.showMessageBox(windowOf(e), { type: 'question', buttons: [ok, 'Cancel'], defaultId: 1, cancelId: 1, message, detail })
   return response === 0
+})
+// a choice of several buttons, the last one cancels: resolves to the index picked
+ipcMain.handle('ask', async (e, message, detail, buttons) => {
+  const last = buttons.length - 1
+  const { response } = await dialog.showMessageBox(windowOf(e), { type: 'warning', buttons, defaultId: last, cancelId: last, message, detail })
+  return response
 })
 
 // ---- menus ----
