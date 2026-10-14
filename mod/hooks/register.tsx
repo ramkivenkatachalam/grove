@@ -204,7 +204,11 @@ async function writeStatus($: EngineInterface, message?: string) {
     lastMessage = message
   }
   const status: Status = { state: myState, message: lastMessage, updatedAt: await $.clock.now(), ...summary, details }
-  await $.fs.write(`${me.dir}/status.json`, JSON.stringify(status))
+  // a feature closed under a live session (grove done) keeps no folder: writing would bring it back
+  const open = await $.fs.read(`${me.dir}/feature.json`).then(() => true, () => false)
+  if (open) {
+    await $.fs.write(`${me.dir}/status.json`, JSON.stringify(status))
+  }
 }
 
 async function readGit($: EngineInterface) {

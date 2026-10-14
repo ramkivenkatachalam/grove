@@ -1268,7 +1268,6 @@ def cmd_recap(args: list[str]) -> None:
         print(f"{f['name']}: recap on its way")
         return
     home = feature_dir(f)
-    home.mkdir(parents=True, exist_ok=True)
     lock = home / "recap.lock"
     try:
         held = int(lock.read_text().strip())
@@ -1283,6 +1282,8 @@ def cmd_recap(args: list[str]) -> None:
         if "--wait" in args and not force:
             # a trailing refresh: the last turn of a burst still gets its recap, just a little later
             time.sleep(max(0.0, RECAP_GAP - (time.time() - prev.get("updatedAt", 0) / 1000)))
+            if not (home / "feature.json").exists():
+                return  # closed (grove done) while this waited: writing would bring its folder back
         recap, what = write_recap(f, prev, force)
     finally:
         lock.unlink(missing_ok=True)

@@ -274,3 +274,20 @@ test('tmux commands that would reach the live server are blocked', async ($, on)
   await bash('git status')
   expect(ran).toBe(4)
 })
+
+test('a closed feature gets no status file back', async ($, on) => {
+  const fake = host(on)
+  on('classic.Notification', () => ({}))
+
+  await $.session.start({ cwd: WT, surface: null, isInteractive: true })
+  expect(fake.status().state).toBe('ready')
+
+  // grove done removes the folder while this session is still shutting down
+  for (const path of [...fake.files.keys()]) {
+    if (path.startsWith(`${HUB}/projects/acme/flux/`)) {
+      fake.files.delete(path)
+    }
+  }
+  await $.classic.Notification({ message: 'Claude needs permission to use Bash', notification_type: 'permission_prompt' })
+  expect(fake.files.has(`${HUB}/projects/acme/flux/status.json`)).toBe(false)
+})
