@@ -61,7 +61,7 @@ State lives in `~/.grove/`, one folder per project and per feature:
                                      /status.json    session state, written by the mod
                                      /brief.md       the task, until the agent picks it up
                                      /recap.json     the Summary tab's recap (grove recap)
-                                     /notes.md  retro.md   the Notes and Retro tabs
+                                     /notes.md  retro.md   the Summary tab's Scratchpad and Retro
                                      /worktree/      the feature's git worktree
 ```
 
@@ -114,6 +114,8 @@ to start a second Claude on a worktree that already has one.
 | `grove doctor` | Check projects and features: files, deps, ports, env, labels |
 | `grove project add\|ls\|default\|show` | Manage projects |
 | `grove pr` · `grove findings <name>` | Refresh PR/CI · list unanswered review-bot findings |
+| `grove retro <name>` | Drafts the feature's retro (what went well, what didn't, what to try next time with an agent) into its `retro.md`, from its conversations, recap and git. The Summary tab's Retro section has the same button |
+| `grove send <name> <text…>` | Types text into a feature's Claude session as one message (starts the session if needed). The Summary tab's Scratchpad sends a selection this way |
 | `grove recap <name> [--force]` | A scannable recap of a feature (goal, done, now, next, decisions, blockers) for its Summary tab. Sessions refresh it after each turn, at most every 3 minutes, and skip when nothing changed |
 | `grove keepawake [on\|off\|--status]` | Keeps the Mac awake while any agent is working (sessions start it; it lets go when all are idle). `off` turns it off |
 | `grove theme [palette]` · `grove ui app\|tmux` | Header palette · which front end new features open in |

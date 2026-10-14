@@ -111,7 +111,7 @@ function TerminalView({ termKey, session, focus }) {
 }
 
 // ---------- sidebar ----------
-function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, onCreate, creating, filterRef }) {
+function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, filterRef }) {
   const [filter, setFilter] = useState('')
   const [draft, setDraft] = useState('')
   const [newName, setNewName] = useState('')
@@ -120,6 +120,12 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
     const f = features.find((x) => x.name === renaming)
     if (f) setDraft(f.title)
   }, [renaming])
+  useEffect(() => {
+    if (newOpen && seed) {
+      setTask(seed)
+      setNewName(seed.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').slice(0, 4).join('-').slice(0, 40))
+    }
+  }, [newOpen, seed])
   const q = filter.trim().toLowerCase()
   const shown = features.filter((f) => !q || f.title.toLowerCase().includes(q) || f.name.includes(q) || (f.ticket || '').toLowerCase().includes(q))
   const create = () => {
@@ -127,6 +133,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
     onCreate(newName.trim(), task.trim())
     setNewName('')
     setTask('')
+    setNewOpen(false)
   }
   return (
     <nav className="side" aria-label={`Features of ${project || 'no project'}`}>
@@ -153,7 +160,8 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
         <form className="newcard" onSubmit={(e) => { e.preventDefault(); create() }} onKeyDown={(e) => e.key === 'Escape' && setNewOpen(false)}>
           <label htmlFor="newname">New feature</label>
           <input id="newname" autoFocus placeholder="name or NUM-1234" value={newName} onChange={(e) => setNewName(e.target.value)} />
-          <input aria-label="Task for Claude (optional)" placeholder="task for Claude (optional)" value={task} onChange={(e) => setTask(e.target.value)} />
+          <textarea aria-label="Task for Claude (optional)" placeholder="task for Claude (optional) · ⌘↩ creates" rows={task.includes('\n') ? 4 : 2} value={task}
+            onChange={(e) => setTask(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); create() } }} />
           <div className="actions">
             <button className="btn primary" type="submit" disabled={!newName.trim()}>Create</button>
             <button className="btn" type="button" onClick={() => setNewOpen(false)}>Cancel</button>
@@ -279,8 +287,6 @@ function Header({ f, pal, panels, openList, onToggle, repo }) {
 const TABS = [
   { id: 'claude', label: 'Claude' },
   { id: 'summary', label: 'Summary' },
-  { id: 'notes', label: 'Notes' },
-  { id: 'retro', label: 'Retro' },
 ]
 
 function TabBar({ tab, onTab }) {
@@ -307,7 +313,7 @@ function TabBar({ tab, onTab }) {
 }
 
 // a hub document (notes, retro) for one feature: loads on switch, saves a beat after typing stops
-function useDoc(kind, name) {
+function useDoc(kind, name, version = 0) {
   const [text, setText] = useState('')
   const [saved, setSaved] = useState('loading')
   const pending = useRef(null)
@@ -327,7 +333,7 @@ function useDoc(kind, name) {
         pending.current = null
       }
     }
-  }, [kind, name])
+  }, [kind, name, version])
   const edit = (t) => {
     setText(t)
     setSaved('unsaved')
@@ -347,19 +353,53 @@ function SaveState({ saved, file }) {
   return <span className={`saved ${saved}`} role="status" title={file}>{SAVED[saved]}</span>
 }
 
-function NotesTab({ f }) {
+const docPath = (f, file) => `~/.grove/projects/${f.project}/${f.name}/${file}`
+
+// the scratchpad: your notes on the feature; any of it (or a selection) can start a feature or go to a session
+function Scratchpad({ f, features, onNew, say }) {
   const [text, edit, saved] = useDoc('notes', f.name)
+  const area = useRef(null)
+  const [selected, setSelected] = useState(false)
+  const [target, setTarget] = useState(f.name)
+  const [sending, setSending] = useState(false)
+  useEffect(() => setTarget(f.name), [f.name])
+  const picked = () => {
+    const el = area.current
+    const part = el ? el.value.slice(el.selectionStart, el.selectionEnd).trim() : ''
+    return part || text.trim()
+  }
+  const send = async () => {
+    const t = picked()
+    if (!t) return
+    setSending(true)
+    const r = await hub.fh(['send', target, t])
+    setSending(false)
+    say((r.code ? r.stderr || r.stdout : r.stdout).trim().replace(/^fh: /, ''), Boolean(r.code))
+  }
+  const what = selected ? 'the selection' : 'the whole scratchpad'
   return (
-    <div className="doc">
+    <section className="scratch" aria-label="Scratchpad">
       <div className="doc-bar">
-        <label htmlFor="notes-text">Notes on {f.title}</label>
+        <h2>Scratchpad</h2>
         <span className="grow" />
-        <SaveState saved={saved} file={`~/.claude/feature-hub/notes/${f.name}.md`} />
+        <SaveState saved={saved} file={docPath(f, 'notes.md')} />
       </div>
-      <textarea id="notes-text" className="doc-text" spellCheck value={text} disabled={saved === 'loading'}
-        placeholder="Decisions, links, things to remember about this feature. Markdown, saved as you type."
-        onChange={(e) => edit(e.target.value)} />
-    </div>
+      <textarea ref={area} className="doc-text scratch-text" spellCheck value={text} disabled={saved === 'loading'} aria-label="Scratchpad notes"
+        placeholder="Ideas, follow-ups, things to tell Claude. Select some and start a feature from it, or send it to a session (⌘↩)."
+        onChange={(e) => edit(e.target.value)}
+        onSelect={(e) => setSelected(e.target.selectionEnd > e.target.selectionStart)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); send() } }} />
+      <div className="scratch-actions">
+        <span className="scratch-what">With {what}:</span>
+        <button className="btn" type="button" disabled={!text.trim()} onClick={() => onNew(picked())}>＋ New feature from it</button>
+        <label className="scratch-to">Send to
+          <select value={target} onChange={(e) => setTarget(e.target.value)}>
+            {features.map((x) => <option key={x.name} value={x.name}>{x.name === f.name ? `${x.title} (this one)` : x.title}</option>)}
+          </select>
+        </label>
+        <button className="btn primary" type="button" disabled={!text.trim() || sending} onClick={send}>{sending ? 'Sending…' : 'Send ⌘↩'}</button>
+      </div>
+    </section>
   )
 }
 
@@ -391,24 +431,46 @@ function writeRetro(title, sections) {
   return [`# Retro: ${title}`, ...[...known, ...extra].map((h) => `## ${h}\n\n${sections[h] || ''}`)].join('\n\n').trimEnd() + '\n'
 }
 
-function RetroTab({ f }) {
-  const [text, edit, saved] = useDoc('retro', f.name)
+const RETRO_LOOK = { 'What went well': '✓', 'What didn’t': '✗', 'What to try next time': '→' }
+
+// the retro: drafted once as the feature wraps up (fh retro), lessons for the next feature with an agent
+function RetroSection({ f, say }) {
+  const [version, setVersion] = useState(0)
+  const [text, edit, saved] = useDoc('retro', f.name, version)
+  const [busy, setBusy] = useState(false)
+  const [editing, setEditing] = useState(false)
   const sections = useMemo(() => parseRetro(text), [text])
+  useEffect(() => setEditing(false), [f.name])
+  const draft = async () => {
+    if (text.trim() && !(await hub.confirm('Draft the retro again?', 'The current one is kept as retro.prev.md beside it.'))) return
+    setBusy(true)
+    const r = await hub.fh(['retro', f.name])
+    setBusy(false)
+    if (r.code) return say((r.stderr || r.stdout).trim().replace(/^fh: /, ''), true)
+    setVersion((v) => v + 1)
+  }
+  const bullets = (h) => (sections[h] || '').split('\n').map((l) => l.replace(/^\s*[-*]\s+/, '').trim()).filter(Boolean)
   return (
-    <div className="doc retro">
+    <section className="retro" aria-label="Retro">
       <div className="doc-bar">
-        <span className="doc-title">Retro on {f.title}</span>
+        <h2>Retro</h2>
         <span className="grow" />
-        <SaveState saved={saved} file={`~/.claude/feature-hub/retros/${f.name}.md`} />
+        {text.trim() && <SaveState saved={saved} file={docPath(f, 'retro.md')} />}
+        {text.trim() && <button className="btn" type="button" onClick={() => setEditing(!editing)}>{editing ? 'Done' : 'Edit'}</button>}
+        <button className="btn" type="button" disabled={busy} onClick={draft}>{busy ? 'Drafting…' : text.trim() ? '↻ Draft again' : '✎ Draft retro'}</button>
       </div>
-      {RETRO.map((q, i) => (
-        <div key={q.heading} className="retro-q">
-          <label htmlFor={`retro-${i}`}>{q.heading}</label>
-          <textarea id={`retro-${i}`} className="doc-text" value={sections[q.heading] || ''} placeholder={q.hint} disabled={saved === 'loading'}
-            onChange={(e) => edit(writeRetro(f.title, { ...sections, [q.heading]: e.target.value }))} />
+      {editing ? (
+        <textarea className="doc-text retro-text" spellCheck value={text} aria-label="Retro (markdown)" onChange={(e) => edit(e.target.value)} />
+      ) : text.trim() ? (
+        <div className="recap-grid">
+          {RETRO.map((q) => (
+            <RecapList key={q.heading} glyph={RETRO_LOOK[q.heading] || '•'} word={q.heading} items={bullets(q.heading)} empty="—" />
+          ))}
         </div>
-      ))}
-    </div>
+      ) : (
+        <p className="busy">{busy ? 'Reading the conversations, recap and git…' : 'Draft it as the feature wraps up: what went well, what didn’t, and what to do differently with an agent next time.'}</p>
+      )}
+    </section>
   )
 }
 
@@ -478,7 +540,7 @@ function Recap({ f, pal }) {
   )
 }
 
-function SummaryTab({ f, repo, pal }) {
+function SummaryTab({ f, repo, pal, features, say, onNew }) {
   const [brief, setBrief] = useState('')
   useEffect(() => {
     let live = true
@@ -520,6 +582,8 @@ function SummaryTab({ f, repo, pal }) {
       </dl>
       <h2>Task</h2>
       {task ? <pre className="task">{task}</pre> : <p className="busy">No task was given when this feature was created.</p>}
+      <Scratchpad key={`notes:${f.name}`} f={f} features={features} onNew={onNew} say={say} />
+      <RetroSection key={`retro:${f.name}`} f={f} say={say} />
     </div>
   )
 }
@@ -538,6 +602,7 @@ function App() {
   }) // feature -> main panel tab
   const [renaming, setRenaming] = useState(null)
   const [newOpen, setNewOpen] = useState(false)
+  const [seed, setSeed] = useState('') // a task to start the new-feature form with (from the scratchpad)
   const [creating, setCreating] = useState(null)
   const [toast, setToast] = useState(null)
   const filterRef = useRef(null)
@@ -565,7 +630,7 @@ function App() {
   useEffect(() => { if (current) localStorage.setItem(`current:${hub.project}`, current) }, [current])
   useEffect(() => { localStorage.setItem('open', JSON.stringify(openPanels)) }, [openPanels])
   useEffect(() => { localStorage.setItem('tabs', JSON.stringify(tabs)) }, [tabs])
-  const tab = (f && tabs[f.name]) || 'claude'
+  const tab = (f && TABS.some((t) => t.id === tabs[f.name]) && tabs[f.name]) || 'claude'
   const setTab = useCallback((t) => f && setTabs((all) => ({ ...all, [f.name]: t })), [f?.name])
 
   const say = (text, isError = false) => {
@@ -685,7 +750,7 @@ function App() {
     <div className="app" style={vars}>
       <Sidebar project={state.project} repo={state.repo || ''} elsewhere={Object.values(state.waitingElsewhere || {}).reduce((a, b) => a + b, 0)} features={features} current={f?.name} onPick={(n) => { setCurrent(n); setZoom(null) }} onMenu={rowMenu}
         renaming={renaming} setRenaming={setRenaming} onRename={rename}
-        newOpen={newOpen} setNewOpen={setNewOpen} onCreate={create} creating={creating} filterRef={filterRef} />
+        newOpen={newOpen} setNewOpen={(v) => { if (!v) setSeed(''); setNewOpen(v) }} seed={seed} onCreate={create} creating={creating} filterRef={filterRef} />
       <main className="main">
         {!f && (
           <div className="empty">
@@ -717,9 +782,8 @@ function App() {
                 </section>
                 {tab !== 'claude' && (
                   <section className="tabpanel" id={`tabpanel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
-                    {tab === 'summary' && <SummaryTab f={f} repo={state.repo || ''} pal={pal} />}
-                    {tab === 'notes' && <NotesTab key={f.name} f={f} />}
-                    {tab === 'retro' && <RetroTab key={f.name} f={f} />}
+                    {tab === 'summary' && <SummaryTab f={f} repo={state.repo || ''} pal={pal} features={features} say={say}
+                      onNew={(text) => { setSeed(text); setNewOpen(true) }} />}
                   </section>
                 )}
               </div>

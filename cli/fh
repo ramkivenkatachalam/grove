@@ -20,6 +20,9 @@ per feature, for any project described by a project config (see `fh project`).
   fh doctor              check projects and features: files, deps, ports, env, labels
   fh keepawake [--status|off|on]   keep the Mac awake while any agent is working (Claude
                          sessions start it; it lets go once none are)
+  fh retro <name>        draft the feature's retro (what went well, what didn't, what to try next time
+                         with an agent) into its retro.md; once, as the feature wraps up
+  fh send <name> <text…>  type text into the feature's Claude session (starts it if needed)
   fh recap <name> [--force] [--bg]   a scannable recap of the feature's work (goal, done, now, next,
                          decisions, blockers), written to its recap.json; sessions refresh it after
                          each turn, at most every few minutes; --bg returns at once
@@ -41,7 +44,8 @@ Everything lives under ~/.grove, one folder per project and per feature:
                                        /status.json   written by the Claude Code mod
                                        /brief.md      the task, until the agent picks it up
                                        /recap.json    goal, done, now, next… (fh recap)
-                                       /notes.md  retro.md   yours, from the app
+                                       /notes.md      the Summary tab's scratchpad
+                                       /retro.md      fh retro, then yours to edit
                                        /worktree/     the git worktree (a link for features made elsewhere)
 """
 from __future__ import annotations
@@ -65,6 +69,7 @@ AWAKE = HUB / "keepawake.pid"
 AWAKE_POLL = 30
 RECAP_GAP = 180  # seconds between automatic recaps of one feature
 RECAP_MODEL = "haiku"
+RETRO_MODEL = "sonnet"  # once per feature, so worth the better model
 FH = os.environ.get("GROVE_BIN", str(HUB / "bin/fh"))
 SESSION = "features"
 PARK = "fh-park"  # tmux UI: a detached session where closed panels keep running
@@ -1125,7 +1130,7 @@ def transcript_of(f: dict) -> Path | None:
     return rows[-1] if rows else None
 
 
-def conversation(path: Path) -> tuple[str, str]:
+def conversation(path: Path, keep: int = 12000) -> tuple[str, str]:
     """The first request and the latest exchanges of a transcript, as short plain lines."""
     task, lines = "", []
     with path.open() as fh_:
@@ -1152,7 +1157,7 @@ def conversation(path: Path) -> tuple[str, str]:
             tools = [b.get("name", "") for b in blocks if b.get("type") == "tool_use"]
             if tools:
                 lines.append(f"  (used {', '.join(tools)})")
-    return task[:1500], "\n".join(lines)[-12000:]
+    return task[:1500], "\n".join(lines)[-keep:]
 
 
 def git_facts(f: dict) -> dict:
@@ -1166,6 +1171,25 @@ def git_facts(f: dict) -> dict:
     dirty = [ln[3:] for ln in run(["git", "-C", path, "status", "--porcelain"]).stdout.splitlines()]
     head = run(["git", "-C", path, "rev-parse", "HEAD"]).stdout.strip()
     return {"commits": commits, "files": sorted(set(committed) | set(dirty)), "dirty": len(dirty), "head": head}
+
+
+def ask_model(model: str, system: str, prompt: str, timeout: int = 180) -> dict | str:
+    """One question to a model through the claude CLI; the JSON object it replies with, or what went wrong."""
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_PLUGIN_DIRS"}
+    try:
+        # no user settings (so no Grove mod or hooks in this side call), no tools, nothing saved
+        r = subprocess.run(["claude", "-p", "--setting-sources", "project", "--model", model, "--tools", "",
+                            "--strict-mcp-config", "--no-session-persistence", "--output-format", "text",
+                            "--system-prompt", system], input=prompt, text=True, capture_output=True,
+                           cwd=HUB, env=env, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return str(e)
+    m = re.search(r"\{[\s\S]*\}", r.stdout)
+    try:
+        got = json.loads(m.group(0)) if m else None
+    except ValueError:
+        got = None
+    return got if isinstance(got, dict) else (r.stderr or r.stdout).strip()[:200] or "no JSON in the reply"
 
 
 def write_recap(f: dict, prev: dict, force: bool) -> tuple[dict, str]:
@@ -1185,22 +1209,9 @@ def write_recap(f: dict, prev: dict, force: bool) -> tuple[dict, str]:
               f"Commits on the branch:\n{commits}\n\nFiles touched: {files or 'none'}\n\n"
               f"Previous recap: {json.dumps(old) if old else 'none'}\n\n"
               f"Conversation, latest last:\n{tail or 'none yet'}")
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_PLUGIN_DIRS"}
-    try:
-        # no user settings (so no Grove mod or hooks in this side call), no tools, nothing saved
-        r = subprocess.run(["claude", "-p", "--setting-sources", "project", "--model", RECAP_MODEL, "--tools", "",
-                            "--strict-mcp-config", "--no-session-persistence", "--output-format", "text",
-                            "--system-prompt", RECAP_SYSTEM], input=prompt, text=True, capture_output=True,
-                           cwd=HUB, env=env, timeout=180)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return prev, f"failed: {e}"
-    m = re.search(r"\{[\s\S]*\}", r.stdout)
-    try:
-        got = json.loads(m.group(0)) if m else None
-    except ValueError:
-        got = None
-    if not isinstance(got, dict):
-        return prev, f"failed: {(r.stderr or r.stdout).strip()[:200] or 'no JSON in the reply'}"
+    got = ask_model(RECAP_MODEL, RECAP_SYSTEM, prompt)
+    if isinstance(got, str):
+        return prev, f"failed: {got}"
 
     def tidy(value, width: int) -> str:
         return " ".join(str(value).split())[:width].rstrip(" .")
@@ -1253,6 +1264,91 @@ def cmd_recap(args: list[str]) -> None:
         die(f"recap of {f['name']} {what}")
     print(f"{f['name']}: recap {what}")
     print(json.dumps({k: recap.get(k) for k in ("goal", "done", "now", "next", "decisions", "blockers")}, indent=2, ensure_ascii=False))
+
+
+RETRO_SYSTEM = """You write the retro for one feature that a developer built together with a Claude Code agent.
+It is read before the next feature, to work better with agents. Look at how the work went, not at what
+was built: the task and how it was briefed, scope and planning, verification and testing, tooling and
+environment (Grove, tmux, git, CI, the app), mistakes, rework and their causes, waits, what the agent did
+well or badly, and what the developer could do differently.
+Reply with JSON only, no prose and no code fence: {"well": ["..."], "didnt": ["..."], "try": ["..."]}
+- well: what worked and is worth repeating
+- didnt: what slowed things down or went wrong, with its cause
+- try: concrete changes for the next feature (a line for the brief, a check to run, a CLAUDE.md rule, a tool)
+Fragments, not sentences: no "I" or "we", no trailing periods, at most 14 words per item, 3 to 6 items per
+list. Every item must come from this feature's material; no generic advice."""
+
+RETRO_HEADINGS = (("well", "What went well"), ("didnt", "What didn’t"), ("try", "What to try next time"))
+
+
+def cmd_retro(name: str) -> None:
+    f = feature(name)
+    home = feature_dir(f)
+    talks = sorted((TRANSCRIPTS / mangle(f["path"])).glob("*.jsonl"), key=lambda p: p.stat().st_mtime) \
+        if f.get("kind") != "session" else [t for t in [transcript_of(f)] if t]
+    parts = [conversation(t, 40000 // max(1, len(talks)))[1] for t in talks]
+    task = next((conversation(t)[0] for t in talks if conversation(t)[0]), "")
+    brief = next((p.read_text() for p in (home / "brief.md", home / "brief.sent.md") if p.exists()), "")
+    g = git_facts(f)
+    recap = read_json(home / "recap.json", {})
+    notes = (home / "notes.md").read_text()[:3000] if (home / "notes.md").exists() else ""
+    prompt = (f"Feature: {f['name']} — {f.get('title') or f['name']}\n\nTask as given:\n{(brief or task)[:1500] or 'not recorded'}\n\n"
+              f"Recap: {json.dumps({k: recap.get(k) for k in ('goal', 'done', 'decisions', 'blockers')})}\n\n"
+              f"Commits:\n" + ("\n".join(f"- {c}" for c in g["commits"][:30]) or "none") + "\n\n"
+              f"Developer's notes:\n{notes or 'none'}\n\n"
+              f"Conversation{'s' if len(parts) > 1 else ''}, oldest first:\n" + ("\n\n---\n\n".join(parts) or "none"))
+    print(f"{f['name']}: drafting the retro from {len(talks)} conversation(s)…", flush=True)
+    got = ask_model(RETRO_MODEL, RETRO_SYSTEM, prompt, timeout=300)
+    if isinstance(got, str):
+        die(f"retro of {f['name']} failed: {got}")
+    sections = []
+    for key, heading in RETRO_HEADINGS:
+        rows = got.get(key) if isinstance(got.get(key), list) else []
+        bullets = "\n".join(f"- {' '.join(str(x).split()).rstrip(' .')}" for x in rows if str(x).strip())
+        sections.append(f"## {heading}\n\n{bullets}")
+    text = (f"# Retro: {f.get('title') or f['name']}\n\n"
+            f"_Drafted {time.strftime('%Y-%m-%d')} from the conversation and git; edit freely._\n\n" + "\n\n".join(sections) + "\n")
+    old = home / "retro.md"
+    if old.exists() and old.read_text().strip():
+        old.replace(home / "retro.prev.md")  # one step of undo
+    write_text(old, text)
+    print(text)
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+def claude_in_pane(session: str) -> bool:
+    """Whether Claude runs in the session's pane (fh agent execs it, so it is the pane shell's child)."""
+    pid = tmux("display", "-p", "-t", f"={session}:", "#{pane_pid}").stdout.strip()
+    return bool(pid) and run(["pgrep", "-P", pid, "-x", "claude"]).returncode == 0
+
+
+def cmd_send(name: str, text: str) -> None:
+    """Type text into a feature's Claude session as one message (a bracketed paste, then Enter)."""
+    f = feature(name)
+    if not text.strip():
+        die("send <name> <text…>: nothing to send")
+    session = host_session(f["name"], "claude")
+    if tmux("has-session", "-t", f"={session}").returncode:
+        host(f, servers=False)
+    for _ in range(40):  # a fresh session needs a few seconds before Claude takes input
+        if claude_in_pane(session):
+            break
+        time.sleep(0.5)
+    else:
+        die(f"{f['name']}: Claude is not running in its session (open the feature in Grove, then send again)")
+    time.sleep(0.5)
+    buf = f"fh-send-{os.getpid()}"
+    tmux("set-buffer", "-b", buf, "--", text.strip())
+    tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", f"={session}:")
+    time.sleep(0.3)
+    tmux("send-keys", "-t", f"={session}:", "Enter")
+    print(f"{f['name']}: sent to Claude ({len(text.strip())} characters)")
 
 
 def cmd_agent(name: str) -> None:
@@ -1726,6 +1822,12 @@ def main(argv: list[str]) -> None:
         cmd_migrate()
     elif cmd == "recap":
         cmd_recap(rest)
+    elif cmd == "retro":
+        need(1, "retro <name>")
+        cmd_retro(rest[0])
+    elif cmd == "send":
+        need(2, "send <name> <text…>")
+        cmd_send(rest[0], " ".join(rest[1:]))
     elif cmd == "keepawake":
         cmd_keepawake(rest)
     elif cmd == "attach":
