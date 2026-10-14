@@ -504,8 +504,9 @@ function liveTmuxRisk(command: string): string | null {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('HOME')) ?? ''
-    hub = `${home}/.grove`
-    cli = `${hub}/bin/grove`
+    // GROVE_HUB / GROVE_BIN point a session at a throwaway hub (scripts/try-onboarding.sh)
+    hub = (await $.env.get('GROVE_HUB')) || `${home}/.grove`
+    cli = (await $.env.get('GROVE_BIN')) || `${hub}/bin/grove`
     const registry = await readRegistry($)
     const sid = await $.session.id()
     me = registry.find(one => one.kind === 'session'

@@ -173,6 +173,8 @@ It is safe to re-run. Then restart running Claude sessions so they load the mod,
 | Regenerate the icon from `build/icon.svg` | `npm run icon` |
 | Screenshot the app (visual checks) | `GROVE_SCREENSHOT=/tmp/grove.png npx electron .` |
 | Validate / test the mod | `claude plugin validate mod && claude plugin test mod` |
+| Test onboarding end to end (fake home, sample repo; touches nothing real) | `scripts/try-onboarding.sh check` |
+| Click through onboarding in the app, as a new user | `scripts/try-onboarding.sh app` (or `app --imported`), then `… clean` |
 
 ## Keys
 

@@ -10,6 +10,8 @@ const { spawn, execFile } = require('child_process')
 const HOME = os.homedir()
 const HUB = process.env.GROVE_HUB || path.join(HOME, '.grove')
 const BIN = process.env.GROVE_BIN || path.join(HUB, 'bin/grove')
+// another hub (a try-out or a test) keeps its own window state, not the installed app's
+if (process.env.GROVE_HUB) app.setPath('userData', path.join(HUB, 'app'))
 // a Finder-launched app has a bare PATH: tmux, gh, git and claude live in these
 process.env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(HOME, '.local/bin'), process.env.PATH]
   .filter(Boolean).join(':')

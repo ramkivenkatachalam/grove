@@ -76,6 +76,20 @@ test('a session in a feature worktree publishes its state', async ($, on) => {
   expect(fake.commands.some(argv => argv[0] === 'osascript')).toBe(true)
 })
 
+test('GROVE_HUB and GROVE_BIN point a session at another hub', async ($, on) => {
+  const fake = host(on, { GROVE_HUB: '/tmp/try/hub', GROVE_BIN: '/src/cli/grove' })
+  fake.files.set('/tmp/try/hub/projects/acme/flux/feature.json', JSON.stringify(REGISTRY))
+  fake.files.delete(`${HUB}/projects/acme/flux/feature.json`)
+
+  await $.session.start({ cwd: WT, surface: null, isInteractive: true })
+  expect(JSON.parse(fake.files.get('/tmp/try/hub/projects/acme/flux/status.json') ?? '{}').state).toBe('ready')
+  expect(fake.files.has(`${HUB}/projects/acme/flux/status.json`)).toBe(false)
+
+  const origin = { kind: 'composer' as const }
+  await $.command.run({ command: 'feature', args: '', origin, presentation: { isFullscreen: false, columns: 120 } } as never)
+  expect(fake.commands).toContainEqual(['/src/cli/grove', 'ls'])
+})
+
 test('/feature routes to grove', async ($, on) => {
   const fake = host(on)
 
