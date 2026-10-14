@@ -31,8 +31,8 @@ Quitting Grove stops nothing: every terminal is a tmux session (`fh_<feature>_<p
    reads state files          attaches terminals
          │                          │
  ~/.grove/                     tmux sessions  fh_<feature>_<pane>
-   features/  status/          (claude · shell · services …)
-   projects/  prs.json              ▲            ▲
+   projects/<p>/<feature>/      (claude · shell · services …)
+     feature.json status.json       ▲            ▲
          ▲      ▲                   │            │
    writes│      │writes        starts│            │runs inside
    ┌─────┴──┐ ┌─┴────────────────────┴──┐    ┌───┴─────────────┐
@@ -53,8 +53,18 @@ hosts every process, so the app can come and go.
 | tmux | `fh_<feature>_<pane>` sessions | Hosts every Claude, service and shell process; the app attaches to them and nothing stops when it quits |
 | tmux config | `tmux/grove.tmux.conf` | The terminal-only front end (header in tmux's status line), used with `fh ui tmux` |
 
-State lives in `~/.grove/`: `features/*.json` (registry), `status/*.json` (per-session
-state written by the mod), `projects/*.json`, `prs.json`, `theme.json`, `config.json`.
+State lives in `~/.grove/`, one folder per project and per feature:
+
+```
+~/.grove/projects/<project>/project.json             your config for the project
+~/.grove/projects/<project>/<feature>/feature.json   registry entry
+                                     /status.json    session state, written by the mod
+                                     /brief.md       the task, until the agent picks it up
+                                     /worktree/      the feature's git worktree
+```
+
+plus `prs.json`, `theme.json`, `config.json` at the top. A hub from an older version moves over with
+`grove migrate` (existing worktrees stay put; their feature folders link to them).
 
 ## Projects
 
@@ -66,7 +76,7 @@ grove new csv-export                 # in or outside the repo; --project picks o
 ```
 
 The config is the repo's own **`.grove.json`** (commit it to share it with your team) merged under
-**`~/.grove/projects/<name>.json`** (yours; at least `{"repo": "~/code/my-repo"}`).
+**`~/.grove/projects/<name>/project.json`** (yours; at least `{"repo": "~/code/my-repo"}`).
 
 | Key | What it does |
 |---|---|
@@ -75,7 +85,7 @@ The config is the repo's own **`.grove.json`** (commit it to share it with your 
 | `env` | Rewrites per worktree: `port` points `localhost:NNNN` in a key at a service; `set` sets a whole value (`{web}` = the web port) |
 | `labels` | Shows a value from an env file as a label (e.g. which database) and warns on some (e.g. `PROD`) |
 | `checks`, `agentNotes` | What Claude should run before finishing, and anything else it should know |
-| `base`, `branchPrefix`, `worktrees` | Branch start point, branch naming (`{user}/`), where worktrees go |
+| `base`, `branchPrefix`, `worktrees` | Branch start point, branch naming (`{user}/`), where worktrees go (default: each feature's folder in `~/.grove`) |
 
 See [`examples/nextjs-fastapi.grove.json`](examples/nextjs-fastapi.grove.json).
 

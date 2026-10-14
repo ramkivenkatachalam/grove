@@ -4,7 +4,7 @@
 set -euo pipefail
 R="$(cd "$(dirname "$0")" && pwd)"
 H="$HOME/.grove"
-mkdir -p "$H/bin" "$H/features" "$H/status" "$H/briefs"
+mkdir -p "$H/bin" "$H/projects"
 
 link() {  # link <target in repo> <live path>
   if [ -e "$2" ] && [ ! -L "$2" ]; then mv "$2" "$2.bak.$(date +%s)"; fi

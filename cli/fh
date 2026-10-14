@@ -16,6 +16,7 @@ per feature, for any project described by a project config (see `fh project`).
   fh findings <name> [--brief] [--mark]   unanswered claude[bot]/Copilot review comments
   fh clean [--yes]       list (or remove) features whose PR merged and whose tree is clean
   fh done <name>         stop everything and unregister; the worktree is kept
+  fh migrate             move an older hub to one folder per project and feature (safe to re-run)
   fh doctor              check projects and features: files, deps, ports, env, labels
   fh keepawake [--status|off|on]   keep the Mac awake while any agent is working (Claude
                          sessions start it; it lets go once none are)
@@ -29,6 +30,14 @@ per feature, for any project described by a project config (see `fh project`).
   fh ui [app|tmux]       which front end new features open in
   fh theme [palette]     header palette (claude, plum, teal, wine, forest, slate)
   fh toggle <name> <panel> · fh relayout <name> · fh attach      (tmux UI)
+
+Everything lives under ~/.grove, one folder per project and per feature:
+
+  ~/.grove/projects/<project>/project.json            your config for that project
+  ~/.grove/projects/<project>/<feature>/feature.json  the registry entry
+                                       /status.json   written by the Claude Code mod
+                                       /brief.md      the task, until the agent picks it up
+                                       /worktree/     the git worktree (a link for features made elsewhere)
 """
 from __future__ import annotations
 
@@ -36,6 +45,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -44,7 +54,7 @@ from pathlib import Path
 
 HOME = Path.home()
 HUB = Path(os.environ.get("GROVE_HUB", HOME / ".grove"))
-REG, STATUS, BRIEFS, PROJECTS = HUB / "features", HUB / "status", HUB / "briefs", HUB / "projects"
+PROJECTS = HUB / "projects"
 PRS, FEEDBACK, CONFIG, THEME = HUB / "prs.json", HUB / "feedback.json", HUB / "config.json", HUB / "theme.json"
 AWAKE = HUB / "keepawake.pid"
 AWAKE_POLL = 30
@@ -55,8 +65,7 @@ PR_TTL = 180
 BOTS = ("claude[bot]", "copilot")
 TICKET = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
 
-for d in (REG, STATUS, BRIEFS, PROJECTS):
-    d.mkdir(parents=True, exist_ok=True)
+PROJECTS.mkdir(parents=True, exist_ok=True)
 
 
 def die(msg: str) -> None:
@@ -79,6 +88,7 @@ def read_json(path: Path, default):
 
 
 def write_json(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(value, indent=2) + "\n")
     tmp.replace(path)
@@ -91,10 +101,11 @@ def expand(path: str) -> Path:
 # ---------- projects ----------
 #
 # A project config says how to grow a feature from a repo. It is the repo's own `.grove.json`
-# (shareable, committed by the team) merged under ~/.grove/projects/<name>.json
+# (shareable, committed by the team) merged under ~/.grove/projects/<name>/project.json
 # (yours: at least {"repo": …}; anything here overrides the repo's file).
 #
-#   repo          the main checkout                        worktrees  where worktrees go (default: beside repo)
+#   repo          the main checkout                        worktrees  where worktrees go (default: in each
+#                                                                     feature's folder under ~/.grove)
 #   base          start point for new branches (origin/main)   branchPrefix  "{user}/" by default
 #   setup         {"link": [...], "clone": [...], "copy": [...], "run": [...]}, paths relative to the repo:
 #                 link = symlink to the main checkout's copy; clone = APFS copy-on-write clone;
@@ -120,12 +131,16 @@ DEFAULT_PROJECT = {
 }
 
 
+def project_conf(name: str) -> Path:
+    return PROJECTS / name / "project.json"
+
+
 def project_names() -> list[str]:
-    return sorted(p.stem for p in PROJECTS.glob("*.json"))
+    return sorted(p.parent.name for p in PROJECTS.glob("*/project.json"))
 
 
 def project(name: str) -> dict:
-    mine = read_json(PROJECTS / f"{name}.json", None)
+    mine = read_json(project_conf(name), None)
     if mine is None:
         die(f"no project '{name}' (fh project ls)")
     repo = expand(mine.get("repo", ""))
@@ -133,8 +148,13 @@ def project(name: str) -> dict:
     p = {**DEFAULT_PROJECT, **shared, **mine}
     p["setup"] = {**DEFAULT_PROJECT["setup"], **shared.get("setup", {}), **mine.get("setup", {})}
     p["name"], p["repo"] = name, repo
-    p["worktrees"] = expand(p["worktrees"]) if p.get("worktrees") else repo.parent
+    p["worktrees"] = expand(p["worktrees"]) if p.get("worktrees") else None
     return p
+
+
+def worktree_for(p: dict, name: str) -> Path:
+    """Where a new feature's worktree goes: its own folder in the hub, unless the project says otherwise."""
+    return p["worktrees"] / name if p["worktrees"] else PROJECTS / p["name"] / name / "worktree"
 
 
 def default_project() -> str:
@@ -182,15 +202,33 @@ def fill(text: str, f: dict, port: int | None = None) -> str:
 # ---------- registry ----------
 
 def features() -> list[dict]:
-    rows = [read_json(p, None) for p in sorted(REG.glob("*.json"))]
+    rows = [read_json(p, None) for p in sorted(PROJECTS.glob("*/*/feature.json"))]
     return [r for r in rows if r]
 
 
+def registered(name: str) -> Path | None:
+    """The feature.json of `name`, in whichever project it is (names are unique across projects)."""
+    return next(PROJECTS.glob(f"*/{name}/feature.json"), None)
+
+
 def feature(name: str) -> dict:
-    f = read_json(REG / f"{name}.json", None)
+    path = registered(name)
+    f = read_json(path, None) if path else None
     if not f:
         die(f"no feature '{name}' (fh ls)")
     return f
+
+
+def feature_dir(f: dict) -> Path:
+    return PROJECTS / (f.get("project") or default_project()) / f["name"]
+
+
+def save(f: dict) -> None:
+    write_json(feature_dir(f) / "feature.json", f)
+
+
+def status_of(f: dict) -> dict:
+    return read_json(feature_dir(f) / "status.json", {})
 
 
 def ports(f: dict) -> dict[str, int]:
@@ -696,10 +734,61 @@ You are working alone in worktree `{f['path']}` on branch `{f['branch']}`. {serv
   then invoke the `pr-watch-feedback` skill (if you have it) to see CI and review findings through.
 - End with a 3-line summary: what changed, what you verified, what you did not.
 """
-    (BRIEFS / f"{f['name']}.md").write_text("\n\n".join(head) + "\n" + body)
+    (feature_dir(f) / "brief.md").write_text("\n\n".join(head) + "\n" + body)
 
 
 # ---------- commands ----------
+
+def link_worktree(f: dict) -> None:
+    """A feature whose worktree lives elsewhere gets a `worktree` link in its folder."""
+    link = feature_dir(f) / "worktree"
+    if f.get("kind") != "session" and not link.exists() and not link.is_symlink() and Path(f["path"]).is_dir():
+        link.symlink_to(f["path"])
+
+
+def cmd_migrate() -> None:
+    """From the older layout (features/, status/, briefs/, projects/<name>.json) to one folder per
+    project and feature. Copies first, then parks the old files in old-layout/; safe to re-run.
+    Worktrees stay where they are (a Claude conversation can only resume from its own folder):
+    each feature folder links to its worktree instead."""
+    old = {"features": HUB / "features", "status": HUB / "status", "briefs": HUB / "briefs"}
+    flat = sorted(PROJECTS.glob("*.json"))
+    if not flat and not any(d.is_dir() for d in old.values()):
+        print("migrate: nothing to do, the hub already has one folder per project and feature")
+        return
+    park = HUB / "old-layout"
+    (park / "projects").mkdir(parents=True, exist_ok=True)
+    for path in flat:
+        if not project_conf(path.stem).exists():
+            write_json(project_conf(path.stem), read_json(path, {}))
+        path.rename(park / "projects" / path.name)
+    fallback = read_json(CONFIG, {}).get("defaultProject") or next(iter(project_names()), None)
+    moved = 0
+    for path in sorted(old["features"].glob("*.json")) if old["features"].is_dir() else []:
+        f = read_json(path, None)
+        if not f or not (f.get("project") or fallback):
+            print(f"migrate: skipped {path.name} (unreadable, or no project to put it in)")
+            continue
+        f["project"] = f.get("project") or fallback
+        home = feature_dir(f)
+        if not (home / "feature.json").exists():
+            save(f)
+        n = f["name"]
+        for src, leaf in ((old["status"] / f"{n}.json", "status.json"), (old["briefs"] / f"{n}.md", "brief.md"),
+                          (old["briefs"] / f"{n}.sent.md", "brief.sent.md")):
+            if src.exists() and not (home / leaf).exists():
+                shutil.copy2(src, home / leaf)
+        link_worktree(f)
+        moved += 1
+    for key, d in old.items():
+        if d.is_dir():
+            target = park / key
+            if target.exists():
+                shutil.rmtree(target)
+            d.rename(target)
+    print(f"migrate: {len(flat)} project(s), {moved} feature(s) moved; the old files are in {park}")
+    print("Restart running Claude sessions so the mod reports to the new place.")
+
 
 def cmd_new(args: list[str]) -> None:
     prompt = base = title = parent = proj = None
@@ -720,7 +809,7 @@ def cmd_new(args: list[str]) -> None:
             rest.append(a)
     if not rest:
         die("fh new <name|TICKET-123> [--project P] [--title T] [--parent NAME] [--base REF] [-p PROMPT]")
-    if parent and not proj and (REG / f"{parent}.json").exists():
+    if parent and not proj and registered(parent):
         proj = feature(parent).get("project")
     p = project(proj or project_here() or default_project())
     arg = rest[0]
@@ -728,12 +817,13 @@ def cmd_new(args: list[str]) -> None:
     name = arg.lower()
     if not re.match(r"^[a-z0-9][a-z0-9._-]{0,40}$", name):
         die("name must be lowercase letters, digits, . _ -")
-    if (REG / f"{name}.json").exists():
+    if registered(name):
         die(f"feature '{name}' exists")
     repo = p["repo"]
     if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
         die(f"{repo} is not a git repository (project {p['name']})")
-    wt = p["worktrees"] / name
+    wt = worktree_for(p, name)
+    wt.parent.mkdir(parents=True, exist_ok=True)
     branch = p["branchPrefix"].replace("{user}", handle(p)) + name
     run(["git", "-C", str(repo), "fetch", "-q", "--prune", "origin"])
     if wt.exists():
@@ -761,7 +851,7 @@ def cmd_new(args: list[str]) -> None:
     if parent:
         f["parent"] = parent
     provision(p, f)
-    write_json(REG / f"{name}.json", f)
+    save(f)
     if ticket or prompt:
         write_brief(p, f, ticket, prompt)
     open_window(f)
@@ -810,7 +900,7 @@ def cmd_adopt(args: list[str]) -> None:
         branch = run(["git", "-C", str(wt), "branch", "--show-current"]).stdout.strip()
         tail = branch.split("/")[-1] or wt.name
         fname = (name if name and len(paths) == 1 else re.sub(r"[^a-z0-9._-]+", "-", tail.lower()))[:40].strip("-.")
-        if (REG / f"{fname}.json").exists():
+        if registered(fname):
             fname = f"{fname[:36]}-{wt.name[-3:]}"
         m = re.match(r"^([a-z][a-z0-9]*-\d+)", fname)
         pr_title = run(["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "title",
@@ -827,7 +917,8 @@ def cmd_adopt(args: list[str]) -> None:
         if p.get("agentNotes"):
             f["agentNotes"] = p["agentNotes"]
         provision(p, f)
-        write_json(REG / f"{fname}.json", f)
+        save(f)
+        link_worktree(f)
         open_window(f, servers=False)
         print(f"{fname}: adopted {wt} [{branch}] “{f['title']}”  {service_urls(f)} (services stopped: fh up {fname})")
 
@@ -886,14 +977,14 @@ def adopt_session(sid: str, title: str | None) -> None:
     if p is None:
         die(f"{info['cwd']} is in no registered project")
     name = f"s-{sid[:8]}"
-    if (REG / f"{name}.json").exists():
+    if registered(name):
         print(f"{name}: already in Grove")
         return
     f = {"name": name, "kind": "session", "session": sid, "project": p["name"], "path": info["cwd"],
          "branch": info["branch"] or run(["git", "-C", info["cwd"], "branch", "--show-current"]).stdout.strip(),
          "ports": {}, "title": title or info["title"] or f"Session {sid[:8]}", "confirmResume": True,
          "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-    write_json(REG / f"{name}.json", f)
+    save(f)
     open_window(f)
     rel = info["cwd"][len(str(p["repo"])):].lstrip("/") or "main checkout"
     print(f"{name}: “{f['title']}” ({rel}) — type /exit in its old terminal, then press Enter in its Grove panel")
@@ -953,7 +1044,7 @@ def agents_working() -> list[str]:
     """Features whose session says it is working and whose Claude is still running (a state left
     behind by a crash or a reboot does not count)."""
     return [f["name"] for f in features()
-            if read_json(STATUS / f"{f['name']}.json", {}).get("state") == "working"
+            if status_of(f).get("state") == "working"
             and claude_running_in(f["path"])]
 
 
@@ -1018,7 +1109,7 @@ def cmd_agent(name: str) -> None:
             except (EOFError, KeyboardInterrupt):
                 os.execvp(os.environ.get("SHELL", "zsh"), [os.environ.get("SHELL", "zsh")])
             f.pop("confirmResume", None)
-            write_json(REG / f"{name}.json", f)
+            save(f)
         os.execvp("claude", ["claude", "--resume", f["session"]])
     others = claude_running_in(f["path"])
     if others:
@@ -1029,7 +1120,7 @@ def cmd_agent(name: str) -> None:
             input()
         except (EOFError, KeyboardInterrupt):
             os.execvp(os.environ.get("SHELL", "zsh"), [os.environ.get("SHELL", "zsh")])
-    brief = BRIEFS / f"{name}.md"
+    brief = feature_dir(f) / "brief.md"
     if brief.exists():
         text = brief.read_text()
         brief.rename(brief.with_suffix(".sent.md"))
@@ -1079,7 +1170,7 @@ def cmd_ls() -> None:
     pr_sync()
     print(f"{'FEATURE':<22} {'PROJECT':<12} {'SERVICES':<24} {'LABELS':<14} {'PR':<15} {'STATE':<8} WORK → NEXT")
     for f in regs:
-        status = read_json(STATUS / f"{f['name']}.json", {})
+        status = status_of(f)
         work = " → ".join(x for x in (status.get("work"), status.get("next")) if x) or "-"
         svcs = " ".join(f"{s}:{port}{'●' if port in live else '○'}" for s, port in ports(f).items()) or "-"
         try:
@@ -1141,14 +1232,19 @@ def cmd_done(name: str, remove: bool = False) -> None:
     panes = layout(f) if f.get("project") or project_names() else []
     for port in ports(f).values():
         stop_port(port)
-    for path in (REG / f"{name}.json", STATUS / f"{name}.json", BRIEFS / f"{name}.md"):
-        path.unlink(missing_ok=True)
+    home = feature_dir(f)
+    for leaf in ("feature.json", "status.json", "brief.md"):
+        (home / leaf).unlink(missing_ok=True)
+    if (home / "worktree").is_symlink():
+        (home / "worktree").unlink()
     if remove:
         repo = project_of(f)["repo"]
         r = run(["git", "-C", str(repo), "worktree", "remove", f["path"]])
         print(f"{name}: closed and worktree removed" if r.returncode == 0 else f"{name}: closed; {r.stderr.strip()}")
     else:
         print(f"{name}: closed. Worktree kept at {f['path']}")
+    if home.is_dir() and not any(home.iterdir()):
+        home.rmdir()
     for row in owned_panes(name):
         if row["session"] == PARK:
             tmux("kill-pane", "-t", row["id"])
@@ -1284,20 +1380,20 @@ def cmd_project(rest: list[str]) -> None:
         if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
             die(f"{repo} is not a git repository")
         name = rest[rest.index("--name") + 1] if "--name" in rest else repo.name.lower()
-        if (PROJECTS / f"{name}.json").exists():
+        if project_conf(name).exists():
             die(f"project '{name}' exists (fh project show {name})")
         mine = {"repo": str(repo).replace(str(HOME), "~")}
         if not (repo / ".grove.json").exists():
             mine["services"] = detect_services(repo)
             mine["_help"] = ("Grove project config — see `fh` docs: services, setup, env, labels, checks, agentNotes. "
                              "Commit a .grove.json to the repo to share it; keys here override it.")
-        write_json(PROJECTS / f"{name}.json", mine)
+        write_json(project_conf(name), mine)
         cfg = read_json(CONFIG, {})
         if not cfg.get("defaultProject"):
             cfg["defaultProject"] = name
             write_json(CONFIG, cfg)
         print(f"project {name}: {repo} ({'.grove.json' if (repo / '.grove.json').exists() else 'starter config'}) "
-              f"→ edit {PROJECTS / (name + '.json')}")
+              f"→ edit {project_conf(name)}")
     elif sub == "default":
         if len(rest) < 2 or rest[1] not in project_names():
             die(f"project default <name> (projects: {', '.join(project_names())})")
@@ -1353,7 +1449,7 @@ def cmd_statusline() -> None:
             "working": ("⏳", "working", pal["working"]), "offline": ("·", "offline", "#a8a8a8")}
     parts = []
     for f in regs:
-        st = read_json(STATUS / f"{f['name']}.json", {}).get("state", "offline")
+        st = status_of(f).get("state", "offline")
         glyph, word, colour = look.get(st, look["offline"])
         num = index.get(f["name"], "?")
         if f is here:
@@ -1424,7 +1520,7 @@ def main(argv: list[str]) -> None:
         need(2, "rename <name> <title…>")
         f = feature(rest[0])
         f["title"] = " ".join(rest[1:]).strip() or f["name"]
-        write_json(REG / f"{f['name']}.json", f)
+        save(f)
         print(f"{f['name']}: titled “{f['title']}”")
     elif cmd == "ui":
         cfg = read_json(CONFIG, {})
@@ -1467,6 +1563,8 @@ def main(argv: list[str]) -> None:
         print(f"{f['name']}: window rebuilt")
     elif cmd == "doctor":
         cmd_doctor()
+    elif cmd == "migrate":
+        cmd_migrate()
     elif cmd == "keepawake":
         cmd_keepawake(rest)
     elif cmd == "attach":

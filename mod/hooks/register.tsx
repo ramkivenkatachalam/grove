@@ -21,6 +21,7 @@ const VERBS = ['ls', 'new', 'go', 'done', 'restart', 'up', 'down', 'clean', 'doc
 
 type Registered = {
   name: string
+  dir: string // its folder in the hub: projects/<project>/<name>, where status.json goes
   path: string
   branch: string
   ports?: Record<string, number>
@@ -101,12 +102,26 @@ async function notify($: EngineInterface, title: string, message: string) {
   ])
 }
 
+// the hub keeps one folder per project, and in it one folder per feature with its feature.json
 async function readRegistry($: EngineInterface): Promise<Registered[]> {
-  const entries = await $.fs.list(`${hub}/features`).catch(() => [])
+  const projects = await $.fs.list(`${hub}/projects`).catch(() => [])
+  const dirs = (await Promise.all(
+    projects
+      .filter(project => project.kind === 'dir')
+      .map(project => $.fs.list(`${hub}/projects/${project.name}`).then(
+        entries => entries.filter(entry => entry.kind === 'dir').map(entry => `${hub}/projects/${project.name}/${entry.name}`),
+        () => [],
+      )),
+  )).flat()
   const rows = await Promise.all(
-    entries
-      .filter(entry => entry.name.endsWith('.json'))
-      .map(entry => $.fs.read(`${hub}/features/${entry.name}`).then(parse<Registered>, () => undefined)),
+    dirs.map(dir => $.fs.read(`${dir}/feature.json`).then(
+      text => {
+        const row = parse<Registered>(text)
+
+        return row === undefined ? undefined : { ...row, dir }
+      },
+      () => undefined,
+    )),
   )
 
   return rows.filter((row): row is Registered => row !== undefined)
@@ -148,7 +163,7 @@ async function refresh($: EngineInterface) {
   const rows: Feature[] = await Promise.all(
     registry.map(async (one): Promise<Feature> => {
       const status = await $.fs
-        .read(`${hub}/status/${one.name}.json`)
+        .read(`${one.dir}/status.json`)
         .then(parse<Status>, () => undefined)
       const pr = cache.byBranch?.[one.branch]
 
@@ -189,7 +204,7 @@ async function writeStatus($: EngineInterface, message?: string) {
     lastMessage = message
   }
   const status: Status = { state: myState, message: lastMessage, updatedAt: await $.clock.now(), ...summary, details }
-  await $.fs.write(`${hub}/status/${me.name}.json`, JSON.stringify(status))
+  await $.fs.write(`${me.dir}/status.json`, JSON.stringify(status))
 }
 
 async function readGit($: EngineInterface) {
@@ -472,7 +487,7 @@ export const register: Register = on => {
       : e.cwd === one.path || e.cwd.startsWith(`${one.path}/`))
     pane = await $.env.get('TMUX_PANE')
     if (me !== undefined) {
-      const previous = await $.fs.read(`${hub}/status/${me.name}.json`).then(parse<Status>, () => undefined)
+      const previous = await $.fs.read(`${me.dir}/status.json`).then(parse<Status>, () => undefined)
       summary = { work: previous?.work ?? '', now: previous?.now ?? '', next: previous?.next ?? '' }
       if (pane !== undefined) {
         await run($, ['tmux', 'set-option', '-w', '-t', pane, '@fh_feature', me.name])

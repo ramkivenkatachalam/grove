@@ -37,15 +37,24 @@ function palette() {
 }
 
 // ---- projects ----
-function projects() {
-  let names = []
+// one folder per project (project.json) holding one folder per feature (feature.json, status.json, worktree/)
+const PROJECTS = path.join(HUB, 'projects')
+
+function folders(dir) {
   try {
-    names = fs.readdirSync(path.join(HUB, 'projects')).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -5)).sort()
-  } catch {}
-  return names.map((name) => {
-    const repo = (readJSON(path.join(HUB, 'projects', name + '.json'), {}).repo || '').replace(/^~/, HOME)
-    return { name, repo }
-  })
+    return fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
+  } catch {
+    return []
+  }
+}
+
+function projects() {
+  return folders(PROJECTS)
+    .filter((name) => fs.existsSync(path.join(PROJECTS, name, 'project.json')))
+    .map((name) => {
+      const repo = (readJSON(path.join(PROJECTS, name, 'project.json'), {}).repo || '').replace(/^~/, HOME)
+      return { name, repo }
+    })
 }
 
 function defaultProject() {
@@ -55,20 +64,16 @@ function defaultProject() {
 }
 
 function allFeatures() {
-  let files = []
-  try {
-    files = fs.readdirSync(path.join(HUB, 'features')).filter((f) => f.endsWith('.json'))
-  } catch {}
   const prs = (readJSON(path.join(HUB, 'prs.json'), {}).byBranch) || {}
-  const fallback = defaultProject()
-  return files
-    .map((file) => readJSON(path.join(HUB, 'features', file), null))
-    .filter(Boolean)
-    .map((f) => ({
+  const dirs = folders(PROJECTS).flatMap((p) => folders(path.join(PROJECTS, p)).map((name) => path.join(PROJECTS, p, name)))
+  return dirs
+    .map((dir) => [dir, readJSON(path.join(dir, 'feature.json'), null)])
+    .filter(([, f]) => f)
+    .map(([dir, f]) => ({
       ...f,
-      project: f.project || fallback,
+      project: f.project || path.basename(path.dirname(dir)),
       title: f.title || f.name,
-      status: readJSON(path.join(HUB, 'status', f.name + '.json'), { state: 'offline' }),
+      status: readJSON(path.join(dir, 'status.json'), { state: 'offline' }),
       pr: prs[f.branch] || null,
     }))
     .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.name.localeCompare(b.name))
@@ -103,7 +108,9 @@ function sendState() {
 let pending = null
 function watchHub() {
   try {
-    fs.watch(HUB, { recursive: true }, () => {
+    fs.watch(HUB, { recursive: true }, (_event, file) => {
+      // worktrees live under the hub too: only Grove's own state files count
+      if (file && (/(^|\/)worktree(\/|$)/.test(file) || !/\.json$/.test(file))) return
       clearTimeout(pending)
       pending = setTimeout(sendState, 150)
     })

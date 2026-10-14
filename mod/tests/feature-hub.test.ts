@@ -7,15 +7,24 @@ const REGISTRY = { name: 'flux', project: 'acme', path: WT, branch: 'me/flux', p
 
 // a fake host beneath the plugin: files in memory, commands recorded
 function host(on: On, env: Record<string, string> = {}) {
-  const files = new Map<string, string>([[`${HUB}/features/flux.json`, JSON.stringify(REGISTRY)]])
+  const files = new Map<string, string>([[`${HUB}/projects/acme/flux/feature.json`, JSON.stringify(REGISTRY)]])
   const commands: string[][] = []
 
   on('env.get', ($, e) => ({ value: e.name === 'HOME' ? '/home/me' : env[e.name] }))
-  on('fs.list', ($, e) => ({
-    value: [...files.keys()]
-      .filter(path => path.startsWith(`${e.path}/`))
-      .map(path => ({ name: path.slice(e.path.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })),
-  }))
+  on('fs.list', ($, e) => {
+    // the direct children of e.path: a file, or a folder some file sits beneath
+    const children = new Map<string, 'file' | 'dir'>()
+    for (const path of files.keys()) {
+      if (path.startsWith(`${e.path}/`)) {
+        const [head, ...rest] = path.slice(e.path.length + 1).split('/')
+        if (head !== undefined) {
+          children.set(head, rest.length > 0 ? 'dir' : 'file')
+        }
+      }
+    }
+
+    return { value: [...children].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 0, isLink: false })) }
+  })
   on('fs.read', ($, e) => {
     const text = files.get(e.path)
     if (text === undefined) {
@@ -49,7 +58,7 @@ function host(on: On, env: Record<string, string> = {}) {
     return { text: e.text }
   })
 
-  const status = () => JSON.parse(files.get(`${HUB}/status/flux.json`) ?? '{}')
+  const status = () => JSON.parse(files.get(`${HUB}/projects/acme/flux/status.json`) ?? '{}')
 
   return { files, commands, status, submitted, clock }
 }
@@ -83,7 +92,7 @@ test('/feature routes to fh', async ($, on) => {
   expect(fake.commands).toContainEqual([fh, 'new', 'metering-v2', 'origin/main'])
   expect(fake.commands).toContainEqual([fh, 'ls'])
   // not inside a feature worktree: nothing published
-  expect(fake.files.has(`${HUB}/status/flux.json`)).toBe(false)
+  expect(fake.files.has(`${HUB}/projects/acme/flux/status.json`)).toBe(false)
 })
 
 test('a feature session learns its ports and can hand off review findings', async ($, on) => {
@@ -170,13 +179,13 @@ test('Claude can spin off a related feature with a handover', async ($, on) => {
 test('a main-checkout session is matched by its id, not its folder', async ($, on) => {
   const fake = host(on)
   const repo = '/home/me/code/acme'
-  fake.files.set(`${HUB}/features/s-sess1.json`, JSON.stringify({ name: 's-sess1', kind: 'session', session: 'sess-1', project: 'acme', path: repo, branch: 'main', ports: {} }))
-  fake.files.set(`${HUB}/features/s-other.json`, JSON.stringify({ name: 's-other', kind: 'session', session: 'sess-2', project: 'acme', path: repo, branch: 'main', ports: {} }))
+  fake.files.set(`${HUB}/projects/acme/s-sess1/feature.json`, JSON.stringify({ name: 's-sess1', kind: 'session', session: 'sess-1', project: 'acme', path: repo, branch: 'main', ports: {} }))
+  fake.files.set(`${HUB}/projects/acme/s-other/feature.json`, JSON.stringify({ name: 's-other', kind: 'session', session: 'sess-2', project: 'acme', path: repo, branch: 'main', ports: {} }))
 
   await $.session.start({ cwd: repo, surface: null, isInteractive: true })
 
-  expect(fake.files.has(`${HUB}/status/s-sess1.json`)).toBe(true) // this conversation (session.id is sess-1)
-  expect(fake.files.has(`${HUB}/status/s-other.json`)).toBe(false) // same folder, another conversation
+  expect(fake.files.has(`${HUB}/projects/acme/s-sess1/status.json`)).toBe(true) // this conversation (session.id is sess-1)
+  expect(fake.files.has(`${HUB}/projects/acme/s-other/status.json`)).toBe(false) // same folder, another conversation
 })
 
 test('a working session asks fh to keep the Mac awake', async ($, on) => {
@@ -189,4 +198,17 @@ test('a working session asks fh to keep the Mac awake', async ($, on) => {
   await $.turn.start({ turnId: 't1' } as never)
   expect(fake.status().state).toBe('working')
   expect(fake.commands).toContainEqual([`${HUB}/bin/fh`, 'keepawake'])
+})
+
+test('each feature reports into its own folder, whatever project it is in', async ($, on) => {
+  const fake = host(on)
+  const other = '/home/me/code/beta'
+  fake.files.set(`${HUB}/projects/acme/project.json`, JSON.stringify({ repo: '~/code/acme' }))
+  fake.files.set(`${HUB}/projects/zeta/project.json`, JSON.stringify({ repo: '~/code/zeta' }))
+  fake.files.set(`${HUB}/projects/zeta/beta/feature.json`, JSON.stringify({ name: 'beta', project: 'zeta', path: other, branch: 'me/beta', ports: {} }))
+
+  await $.session.start({ cwd: other, surface: null, isInteractive: true })
+
+  expect(JSON.parse(fake.files.get(`${HUB}/projects/zeta/beta/status.json`) ?? '{}').state).toBe('ready')
+  expect(fake.files.has(`${HUB}/projects/acme/flux/status.json`)).toBe(false)
 })
