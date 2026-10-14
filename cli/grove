@@ -92,8 +92,8 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def run(argv, cwd=None, check=False) -> subprocess.CompletedProcess:
-    r = subprocess.run(argv, cwd=cwd, text=True, capture_output=True)
+def run(argv, cwd=None, check=False, env=None) -> subprocess.CompletedProcess:
+    r = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, env=env)
     if check and r.returncode:
         die(f"{' '.join(str(a) for a in argv[:3])}…: {r.stderr.strip() or r.stdout.strip()}")
     return r
@@ -136,6 +136,7 @@ def expand(path: str) -> Path:
 #   labels        [{"name", "file", "key", "rules": [[regex, label], ...], "warn": [labels]}]
 #   checks        what the agent should run before finishing      agentNotes  extra lines for the agent
 #   panels        extra panels: [{"name", "key", "run", "dir"}]
+#   ghUser        the gh account for this repo's PRs (default: whichever signed-in account can see it)
 
 DEFAULT_PROJECT = {
     "base": "origin/main",
@@ -664,9 +665,11 @@ def pr_sync(force: bool = False) -> dict:
         p = project(name)
         if p.get("prs") is False:
             continue
-        r = run(["gh", "pr", "list", "--author", "@me", "--state", "all", "--limit", "60", "--json",
-                 "number,headRefName,state,isDraft,url,statusCheckRollup,reviewDecision,updatedAt"], cwd=p["repo"])
+        r = gh(p, ["pr", "list", "--author", "@me", "--state", "all", "--limit", "60", "--json",
+                   "number,headRefName,state,isDraft,url,statusCheckRollup,reviewDecision,updatedAt"])
         if r.returncode:
+            # no account could reach it this time: keep what was known rather than blank its PRs
+            by_branch.update({b: pr for b, pr in cache.get("byBranch", {}).items() if pr.get("project") == name})
             continue
         for pr in json.loads(r.stdout):
             b = pr["headRefName"]
@@ -679,7 +682,7 @@ def pr_sync(force: bool = False) -> dict:
         pr = by_branch.get(f["branch"])
         if pr and pr["state"] == "OPEN":
             pr["findings"] = len(new_findings(project_of(f), pr["number"], pr["updatedAt"]))
-    cache = {"fetchedAt": time.time(), "byBranch": by_branch}
+    cache = {"fetchedAt": time.time(), "byBranch": by_branch, "accounts": read_json(PRS, {}).get("accounts", {})}
     write_json(PRS, cache)
     return cache
 
@@ -690,8 +693,45 @@ def pr_for(f: dict) -> dict | None:
     return read_json(PRS, {}).get("byBranch", {}).get(f["branch"])
 
 
+def gh_accounts() -> list[str]:
+    """Every GitHub account gh is signed in to, the active one first."""
+    out = run(["gh", "auth", "status", "--hostname", "github.com"])
+    found = re.findall(r"account (\S+).*?\n\s*- Active account: (true|false)", out.stdout + out.stderr)
+    return [u for u, active in found if active == "true"] + [u for u, active in found if active != "true"]
+
+
+def gh_token(user: str) -> str:
+    return run(["gh", "auth", "token", "--hostname", "github.com", "--user", user]).stdout.strip()
+
+
+def gh_user(p: dict) -> str | None:
+    """The signed-in GitHub account that can see a project's repo. People are often signed in to a personal
+    and a work account with only one active, and gh answers an unreachable repo's `pr list` with an empty
+    list, not an error: so test access once (gh repo view) and remember the account in prs.json."""
+    if p.get("ghUser"):
+        return p["ghUser"]
+    known = read_json(PRS, {}).get("accounts", {}).get(p["name"])
+    if known and gh_token(known):
+        return known
+    for user in gh_accounts():
+        token = gh_token(user)
+        if token and not run(["gh", "repo", "view", "--json", "name"], cwd=p["repo"], env={**os.environ, "GH_TOKEN": token}).returncode:
+            cache = read_json(PRS, {})
+            cache.setdefault("accounts", {})[p["name"]] = user
+            write_json(PRS, cache)
+            return user
+    return None  # gh as it is
+
+
+def gh(p: dict, args: list[str]) -> subprocess.CompletedProcess:
+    """gh in a project's repo, as the account that can see it."""
+    user = gh_user(p)
+    token = gh_token(user) if user else ""
+    return run(["gh", *args], cwd=p["repo"], env={**os.environ, "GH_TOKEN": token} if token else None)
+
+
 def bot_comments(p: dict, number: int) -> list[dict]:
-    r = run(["gh", "api", f"repos/:owner/:repo/pulls/{number}/comments", "--paginate", "--jq", ".[]"], cwd=p["repo"])
+    r = gh(p, ["api", f"repos/:owner/:repo/pulls/{number}/comments", "--paginate", "--jq", ".[]"])
     rows = [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
     return [c for c in rows if any(b in (c.get("user") or {}).get("login", "").lower() for b in BOTS)
             and not c.get("in_reply_to_id")]
@@ -936,8 +976,8 @@ def cmd_adopt(args: list[str]) -> None:
         if registered(fname):
             fname = f"{fname[:36]}-{wt.name[-3:]}"
         m = re.match(r"^([a-z][a-z0-9]*-\d+)", fname)
-        pr_title = run(["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "title",
-                        "--jq", ".[0].title // \"\""], cwd=p["repo"]).stdout.strip() if branch else ""
+        pr_title = gh(p, ["pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "title",
+                          "--jq", ".[0].title // \"\""]).stdout.strip() if branch else ""
         taken = listening() | {port for other in features() for port in ports(other).values()}
         assigned = {}
         for svc in services(p):
