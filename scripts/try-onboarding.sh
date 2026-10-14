@@ -25,7 +25,7 @@ stop_tmux() { tmux -S "$T/tm/tmux-$(id -u)/default" kill-server 2>/dev/null || t
 
 sample() {  # sample [with-conversation]
   stop_tmux
-  rm -rf "$T"
+  rm -rf "$T" 2>/dev/null || { sleep 2; rm -rf "$T"; }  # an app just closed may still be writing its state
   mkdir -p "$FAKE/.claude" "$T/tm" "$REPO/web/node_modules" "$REPO/api/.venv/bin"
   cd "$REPO"
   git init -q -b main
