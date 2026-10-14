@@ -112,6 +112,13 @@ Tick what you want and **Bring in** (⌘↩). Each worktree becomes a feature wi
 session, named after its PR or its Claude conversation; your code and branch stay as they are. Each
 conversation moves under **Sessions** and resumes with its full history once you `/exit` the old copy.
 
+If something can't come in (a port range that's full, a setup step that fails), the rest still does,
+so you can get going. The sidebar then says "1 couldn't come in · **Fix with Claude**". That shows each
+error and the brief Grove wrote for Claude: what failed, the exact error, the command to retry, where
+the config lives, and what not to touch. Edit it if you like; **Start fixing** opens a **Fix import**
+session under Sessions that works through it, with Claude Code's usual permission prompts. Each item
+drops off the list once it is in Grove. (`grove fix-import --draft` prints the same brief.)
+
 Later, when a worktree or conversation shows up outside Grove (made in a terminal out of habit), the
 sidebar says so ("2 in progress outside Grove · Review"); **Project › Bring In Existing Work…** (⌘⇧I)
 opens the same review. What you leave unticked stops being mentioned.

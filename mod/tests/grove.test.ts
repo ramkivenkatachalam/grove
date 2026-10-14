@@ -76,6 +76,16 @@ test('a session in a feature worktree publishes its state', async ($, on) => {
   expect(fake.commands.some(argv => argv[0] === 'osascript')).toBe(true)
 })
 
+test('a session row without a conversation yet is found by its folder', async ($, on) => {
+  const fake = host(on)
+  const scratch = `${HUB}/projects/acme/fix-import-acme/worktree`
+  fake.files.set(`${HUB}/projects/acme/fix-import-acme/feature.json`,
+    JSON.stringify({ name: 'fix-import-acme', kind: 'session', helper: 'import', project: 'acme', path: scratch, branch: '', ports: {} }))
+
+  await $.session.start({ cwd: scratch, surface: null, isInteractive: true })
+  expect(JSON.parse(fake.files.get(`${HUB}/projects/acme/fix-import-acme/status.json`) ?? '{}').state).toBe('ready')
+})
+
 test('GROVE_HUB and GROVE_BIN point a session at another hub', async ($, on) => {
   const fake = host(on, { GROVE_HUB: '/tmp/try/hub', GROVE_BIN: '/src/cli/grove' })
   fake.files.set('/tmp/try/hub/projects/acme/flux/feature.json', JSON.stringify(REGISTRY))

@@ -195,3 +195,10 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .sheet-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
 .sheet-actions .btn { padding: 6px 12px; }
 .sheet-error { color: #ff9b9b; font-size: 12px; }
+.nudge.failed { border-color: #6a4a3a; }
+.nudge.failed b { color: var(--waiting); }
+.fail-error { color: #ff9b9b; font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pick .btn { align-self: center; flex-shrink: 0; }
+.brief-label { color: var(--accent); font-weight: 600; margin-top: 6px; }
+.brief-label span { color: var(--text-3); font-weight: 400; margin-left: 8px; }
+.doc-text.brief { min-height: 220px; height: 280px; flex: none; font-size: 12px; }

@@ -9,6 +9,8 @@
 #   scripts/try-onboarding.sh app --imported     with the sample's work already brought in
 #   scripts/try-onboarding.sh app … --demo       also give the sample its Claude conversations (a fake home,
 #                                                so Claude panels there are not signed in: for screenshots)
+#   scripts/try-onboarding.sh app … --fail       give web a single port, so only one worktree can come in
+#                                                and the other goes to "Fix with Claude"
 #   scripts/try-onboarding.sh clean              stop its tmux and remove $GROVE_TRY
 #
 # The sample repo, acme-shop, has a Next.js-style web/ and a FastAPI-style api/, an origin, and three
@@ -23,11 +25,12 @@ FAKE="$T/home"
 REPO="$FAKE/code/acme-shop"
 cmd="${1:-check}"
 shift || true
-mode="" demo=0
+mode="" demo=0 fail=0
 for a in "$@"; do
   case "$a" in
     --added|--imported) mode="$a" ;;
     --demo) demo=1 ;;
+    --fail) fail=1 ;;
   esac
 done
 
@@ -90,6 +93,25 @@ step() {  # step <what> <command…>: runs it, shows ✓/✗ and its output on f
   fi
 }
 has() { grep -q -- "$2" <<<"$1"; }
+web_ports() {  # web_ports <lo> <hi>: the sample project's port range for web
+  python3 - "$GROVE_HUB/projects/acme-shop/project.json" "$1" "$2" <<'PY'
+import json, sys
+path, lo, hi = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+conf = json.load(open(path))
+for s in conf["services"]:
+    if s["name"] == "web":
+        s["ports"] = [lo, hi]
+json.dump(conf, open(path, "w"), indent=2)
+PY
+}
+free_web_port() {  # a port in web's usual range that nothing is listening on
+  python3 -c '
+import socket
+for port in range(3001, 3100):
+    with socket.socket() as s:
+        if s.connect_ex(("127.0.0.1", port)):
+            print(port); break'
+}
 features_n() { ls "$GROVE_HUB"/projects/acme-shop/*/feature.json 2>/dev/null | wc -l | tr -d ' '; }
 
 case "$cmd" in
@@ -124,10 +146,33 @@ assert spike["ahead"] == 0 and not spike["dirty"] and spike["at"] < __import__("
 assert [s["title"] for s in d["sessions"]] == ["Fix checkout totals rounding"], d["sessions"]' "$json"
     step "adopts nothing yet" test "$(features_n)" = 0
     step "says the same in words" has "$("$GROVE_BIN" import --project acme-shop 2>&1)" "worktrees not in Grove: 3"
-    echo "bring in (what the app's Bring in runs)"
-    "$GROVE_BIN" adopt "$FAKE/code/acme-shop-csv-export" "$FAKE/code/acme-shop-login-fix" --project acme-shop >/dev/null 2>&1
+    echo "bring in, with one failure (what the app's Bring in runs)"
+    one="$(free_web_port)"
+    web_ports "$one" "$one"  # room for one feature's web server only
+    "$GROVE_BIN" adopt "$FAKE/code/acme-shop-csv-export" --project acme-shop >/dev/null 2>&1
+    err="$("$GROVE_BIN" adopt "$FAKE/code/acme-shop-login-fix" --project acme-shop 2>&1 || true)"
     "$GROVE_BIN" adopt --session 11111111-2222-3333-4444-555555555555 >/dev/null 2>&1
-    step "brings in the two picked worktrees and the conversation" test "$(features_n)" = 3
+    step "brings in what it can" test "$(features_n)" = 2
+    step "says why the other failed" has "$err" "no free port for web"
+    "$GROVE_BIN" fix-import --project acme-shop --record "$(python3 -c 'import json,sys; print(json.dumps([{"path": sys.argv[1], "branch": "fix/login-redirect", "error": sys.argv[2]}]))' "$FAKE/code/acme-shop-login-fix" "$err")" >/dev/null
+    step "keeps the failure, for Fix with Claude" has "$("$GROVE_BIN" import --project acme-shop --json)" '"fixable": true'
+    draft="$("$GROVE_BIN" fix-import --project acme-shop --draft)"
+    step "drafts a brief with the error and the command to retry" python3 -c '
+import sys
+d = sys.argv[1]
+assert "no free port for web" in d and "adopt " in d and "acme-shop-login-fix --project acme-shop" in d, d
+assert "Don\x27t change code" in d and "Done when" in d, d' "$draft"
+    "$GROVE_BIN" fix-import --project acme-shop --start >/dev/null 2>&1
+    step "starts a Fix import session briefed with it" python3 -c '
+import json, sys
+f = json.load(open(sys.argv[1] + "/feature.json"))
+assert f["kind"] == "session" and f["helper"] == "import" and "session" not in f, f
+assert "no free port for web" in open(sys.argv[1] + "/brief.md").read()' "$GROVE_HUB/projects/acme-shop/fix-import-acme-shop"
+    step "a second start opens the same session" has "$("$GROVE_BIN" fix-import --project acme-shop --start 2>&1)" "already open"
+    web_ports 3001 3099  # what Claude would do: give web its range back, then retry
+    "$GROVE_BIN" adopt "$FAKE/code/acme-shop-login-fix" --project acme-shop >/dev/null 2>&1
+    step "a fixed item drops off the list" has "$("$GROVE_BIN" fix-import --project acme-shop --draft --json)" '"failures": \[\]'
+    step "closing the Fix import session leaves the hub folder alone" sh -c "'$GROVE_BIN' done fix-import-acme-shop >/dev/null 2>&1 && test -d '$GROVE_HUB/projects/acme-shop/csv-export'"
     step "names a feature after its Claude conversation" grep -q '"title": "Add CSV export to orders"' "$GROVE_HUB/projects/acme-shop/csv-export/feature.json"
     step "gives each its own ports" test "$(cat "$GROVE_HUB"/projects/acme-shop/*/feature.json | grep -o '"web": [0-9][0-9]*' | sort -u | wc -l | tr -d ' ')" = 2
     step "copies setup into the worktrees" test -L "$FAKE/code/acme-shop-login-fix/api/.venv" -a -f "$FAKE/code/acme-shop-login-fix/web/.env.local"
@@ -145,7 +190,8 @@ assert [s["title"] for s in d["sessions"]] == ["Fix checkout totals rounding"], 
     export GROVE_HUB="$FAKE/.grove" GROVE_BIN="$R/cli/grove" TMUX_TMPDIR="$T/tm" GROVE_USER=tester
     mkdir -p "$GROVE_HUB/bin" && ln -sfn "$R/cli/grove" "$GROVE_HUB/bin/grove"
     case "$mode" in
-      --added) "$GROVE_BIN" import "$REPO" --json >/dev/null 2>&1; export GROVE_PROJECT=acme-shop GROVE_REVIEW=1 ;;
+      --added) "$GROVE_BIN" import "$REPO" --json >/dev/null 2>&1; export GROVE_PROJECT=acme-shop GROVE_REVIEW=1
+               if [ "$fail" = 1 ]; then one="$(free_web_port)"; web_ports "$one" "$one"; fi ;;
       --imported) "$GROVE_BIN" import "$REPO" --yes >/dev/null 2>&1; export GROVE_PROJECT=acme-shop ;;
     esac
     cat <<MSG

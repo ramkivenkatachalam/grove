@@ -12,6 +12,8 @@ per feature, for any project described by a project config (see `grove project`)
   grove import [<repo>] [--project P] [--hours H] [--yes|--json]
                          register the repo if new, then list (--yes: adopt) its worktrees and recent
                          Claude conversations that are not in Grove yet
+  grove fix-import [--project P] --record JSON | --draft [--json] | --forget KEY | --start [-p BRIEF]
+                         what could not come in, and a Claude session briefed to fix it
   grove ls                  features, ports, servers, labels, PR/CI, session state
   grove go <name>           (tmux UI) switch to the feature's window
   grove up|down|restart <name>   start / stop / restart the feature's services
@@ -1165,7 +1167,7 @@ drop what is no longer true, never invent anything the material does not show.""
 
 def transcript_of(f: dict) -> Path | None:
     """The Claude conversation behind a feature: its own for a session, else the latest in its worktree."""
-    if f.get("kind") == "session":
+    if f.get("kind") == "session" and f.get("session"):
         return next(TRANSCRIPTS.glob(f"*/{f['session']}.jsonl"), None)
     rows = sorted((TRANSCRIPTS / mangle(f["path"])).glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
     return rows[-1] if rows else None
@@ -1395,7 +1397,7 @@ def cmd_send(name: str, text: str) -> None:
 def cmd_agent(name: str) -> None:
     f = feature(name)
     os.chdir(f["path"])
-    if f.get("kind") == "session":
+    if f.get("kind") == "session" and f.get("session"):
         if f.get("confirmResume"):
             print(f"“{f['title']}” moves here from where it was running.")
             print("First type /exit in its old terminal tab (two live copies of one conversation would")
@@ -1848,6 +1850,7 @@ def cmd_import(args: list[str]) -> None:
     if as_json:  # for the app: what is there to bring in, and how features will run
         print(json.dumps({
             "project": p["name"], "repo": str(p["repo"]), "added": bool(added), "config": config_summary(p),
+            "failures": import_failures(p),
             "worktrees": trees,
             "sessions": [{"id": c["id"], "title": c["title"], "at": c["mtime"], "branch": c["branch"],
                           "folder": c["cwd"][len(str(p["repo"])):].lstrip("/") or ""} for c in chats]}))
@@ -1875,6 +1878,119 @@ def cmd_import(args: list[str]) -> None:
         adopt_session(c["id"], None)
     if chats:
         print("Each conversation resumes in Grove once you /exit it where it is running now.")
+
+
+# ---------- items that could not come in, and a Claude session to fix them ----------
+#
+# The app brings work in one item at a time and keeps going past failures; what failed is kept in
+# projects/<p>/import-failures.json until it is in Grove or forgotten. `grove fix-import` drafts a brief
+# for Claude from it and starts a "Fix import" session row (a session without a conversation yet, so
+# nothing that removes worktrees ever touches it) that works from its own scratch folder.
+
+def import_failures(p: dict) -> list[dict]:
+    """The recorded failures still outside Grove, each with whether Claude could help."""
+    rows = read_json(PROJECTS / p["name"] / "import-failures.json", [])
+    paths = {f["path"] for f in features()}
+    sids = {f["session"] for f in features() if f.get("session")}
+    out = []
+    for r in rows:
+        if r.get("path") in paths or r.get("id") in sids:
+            continue
+        if r.get("path") and not Path(r["path"]).is_dir():
+            r = {**r, "fixable": False, "why": "the worktree no longer exists"}
+        elif r.get("id") and not next(TRANSCRIPTS.glob(f"*/{r['id']}.jsonl"), None):
+            r = {**r, "fixable": False, "why": "its conversation is gone from ~/.claude/projects"}
+        else:
+            r = {**r, "fixable": True}
+        out.append(r)
+    return out
+
+
+def fix_brief(p: dict, rows: list[dict]) -> str:
+    items = []
+    for i, r in enumerate(rows, 1):
+        what = (f"Worktree {r['path']} (branch {r.get('branch') or '?'})" if r.get("path")
+                else f"Claude conversation “{r.get('title') or r['id'][:8]}” ({r['id']})")
+        command = (f"{BIN} adopt {shlex.quote(r['path'])} --project {p['name']}" if r.get("path")
+                   else f"{BIN} adopt --session {r['id']}")
+        items.append(f"{i}. {what}\n   Command: {command}\n   Error:\n   ```\n   "
+                     + "\n   ".join(r.get("error", "").strip().splitlines()[-15:]) + "\n   ```")
+    doctor = run([BIN, "doctor"]).stdout.strip().splitlines()
+    return f"""# Bring the rest of {p['name']}'s work into Grove
+
+Grove runs one Claude Code session per git worktree. It just brought work from {p['repo']} in, but
+{'this' if len(rows) == 1 else f'these {len(rows)}'} could not come in:
+
+{chr(10).join(items)}
+
+## What to do
+For each item, find why its command failed, fix the cause, and re-run the command until it succeeds.
+- Grove's config for this project is {project_conf(p['name'])} (mine), merged over
+  {p['repo']}/.grove.json (the team's, committed). `{BIN} project show {p['name']}` prints the result,
+  `{BIN} doctor` checks projects and features, `{BIN} ls` lists features.
+- Prefer fixing Grove's config (ports, services, setup) in project.json, or the environment (say, a
+  dependency missing from the main checkout).
+- Don't change code in the worktrees or the repo, don't delete or move worktrees, branches or
+  uncommitted work, and don't edit .grove.json (the team shares it): ask me first if any of that
+  seems needed.
+
+## Done when
+Each item is in Grove (`{BIN} ls` lists it), or you have told me why it can't be and what I need to
+decide. Finish with one line per item: in Grove, or not and why.
+
+`{BIN} doctor` now:
+```
+{chr(10).join(doctor[-40:])}
+```
+"""
+
+
+def cmd_fix_import(args: list[str]) -> None:
+    """--record JSON  keep what failed ([{path|id, branch, title, error}])
+    --draft [--json]  the brief Claude would get, and the failures (fixable or not, and why)
+    --forget KEY      stop tracking one (a path or a conversation id)
+    --start [-p BRIEF]  start the "Fix import" session with that brief (or the drafted one)"""
+    proj = args[args.index("--project") + 1] if "--project" in args else None
+    p = project(proj or project_here() or default_project())
+    store = PROJECTS / p["name"] / "import-failures.json"
+    if "--record" in args:
+        new = json.loads(args[args.index("--record") + 1])
+        keep = {r.get("path") or r.get("id"): r for r in read_json(store, [])}
+        for r in new:
+            keep[r.get("path") or r.get("id")] = {**r, "at": time.time()}
+        write_json(store, list(keep.values()))
+        print(f"{len(new)} item(s) recorded for {p['name']}")
+    elif "--forget" in args:
+        key = args[args.index("--forget") + 1]
+        write_json(store, [r for r in read_json(store, []) if (r.get("path") or r.get("id")) != key])
+        print(f"forgot {key}")
+    elif "--draft" in args:
+        rows = import_failures(p)
+        brief = fix_brief(p, [r for r in rows if r["fixable"]]) if any(r["fixable"] for r in rows) else ""
+        print(json.dumps({"failures": rows, "brief": brief}) if "--json" in args else brief or "nothing to fix")
+    elif "--start" in args:
+        rows = [r for r in import_failures(p) if r["fixable"]]
+        brief = " ".join(args[args.index("-p") + 1:]) if "-p" in args else (fix_brief(p, rows) if rows else "")
+        if not brief.strip():
+            die("nothing to fix")
+        name = re.sub(r"[^a-z0-9._-]+", "-", f"fix-import-{p['name']}")[:41].strip("-.")
+        if registered(name):
+            print(f"{name}: already open")  # one fixer per project: it keeps its conversation
+            write_json(HUB / "focus.json", {"name": name, "at": time.time()})
+            return
+        home = PROJECTS / p["name"] / name
+        scratch = home / "worktree"  # named like a worktree so the app's file watcher ignores it
+        scratch.mkdir(parents=True, exist_ok=True)
+        f = {"name": name, "kind": "session", "helper": "import", "project": p["name"], "path": str(scratch),
+             "branch": "", "ports": {}, "title": f"Fix import: {len(rows) or 'help'} item{'' if len(rows) == 1 else 's'}",
+             "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        save(f)
+        (home / "brief.md").write_text(brief)
+        open_window(f)
+        write_json(HUB / "focus.json", {"name": name, "at": time.time()})
+        print(f"{name}: Claude is briefed to bring in {len(rows)} item(s)")
+    else:
+        die("fix-import [--project P] --record JSON | --draft [--json] | --forget KEY | --start [-p BRIEF]")
 
 
 def cmd_project(rest: list[str]) -> None:
@@ -1915,7 +2031,7 @@ def cmd_statusline() -> None:
     cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd") or os.getcwd()
     regs = features()
     sid = data.get("session_id")
-    here = next((f for f in regs if (f.get("session") == sid if f.get("kind") == "session"
+    here = next((f for f in regs if (f.get("session") == sid if f.get("kind") == "session" and f.get("session")
                                      else cwd == f["path"] or cwd.startswith(f["path"] + "/"))), None)
     legacy = HOME / ".claude/statusline-feature.sh"
     if here is not None and ui_mode() == "app":
@@ -1986,6 +2102,8 @@ def main(argv: list[str]) -> None:
         cmd_sessions(rest)
     elif cmd in ("import", "onboard"):
         cmd_import(rest)
+    elif cmd == "fix-import":
+        cmd_fix_import(rest)
     elif cmd == "go":
         need(1, "go <name>")
         f = feature(rest[0])

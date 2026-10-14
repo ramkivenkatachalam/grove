@@ -111,7 +111,7 @@ function TerminalView({ termKey, session, focus }) {
 }
 
 // ---------- sidebar ----------
-function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, filterRef, waitingOutside, onReview }) {
+function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, filterRef, waitingOutside, onReview, failedCount, onFix }) {
   const [filter, setFilter] = useState('')
   const [draft, setDraft] = useState('')
   const [newName, setNewName] = useState('')
@@ -191,7 +191,8 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
               </li>
             )
           }
-          const where = f.kind === 'session'
+          const where = f.helper === 'import' ? '◷ bringing in what failed'
+            : f.kind === 'session'
             ? `◷ ${placeOf(f.path, repo)} · ⎇ ${f.branch || '?'}`
             : null
           return (
@@ -212,6 +213,16 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
           )
         })}
       </ul>
+      {failedCount > 0 && (() => {
+        // once a Fix import session exists, the note leads to it instead of starting another
+        const fixer = features.find((x) => x.helper === 'import')
+        return (
+          <button type="button" className="nudge failed" onClick={() => (fixer ? onPick(fixer.name) : onFix())}
+            title={fixer ? 'Open the Fix import session' : 'What could not be brought in, and a Claude session briefed to fix it'}>
+            <span aria-hidden="true">⚠</span> {failedCount} couldn't come in <b>{fixer ? 'Claude is on it' : 'Fix with Claude'}</b>
+          </button>
+        )
+      })()}
       {waitingOutside > 0 && (
         <button type="button" className="nudge" onClick={onReview} title="Worktrees and Claude conversations of this repo that Grove is not running yet (⌘⇧I)">
           <span aria-hidden="true">↧</span> {waitingOutside} in progress outside Grove <b>Review</b>
@@ -252,7 +263,7 @@ function Header({ f, pal, panels, openList, onToggle, repo }) {
         </span>
         <span className="grow" />
         <span className="facts">
-          {f.kind === 'session' ? <span>{placeOf(f.path, repo)} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
+          {f.helper === 'import' ? <span>helper · brings in what could not come in</span> : f.kind === 'session' ? <span>{placeOf(f.path, repo)} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
           {ci && <span style={{ color: ci[0] === 'ready' ? pal.ready : ci[0] }}>{ci[1]}</span>}
           {pr && pr.state !== 'OPEN' && <span>{pr.state.toLowerCase()}</span>}
           {pr?.findings > 0 && <span style={{ color: pal.accent }}>{pr.findings} finding{pr.findings > 1 ? 's' : ''}</span>}
@@ -610,8 +621,9 @@ const humanize = (branch) => {
 // worth bringing in unless nothing has happened there for weeks and it holds no work of its own
 const isStale = (t) => !t.dirty && !t.ahead && (Date.now() / 1000 - t.at) > STALE_DAYS * 86400
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+const failedKeys = (scan) => new Set((scan?.failures || []).map(keyOf))
 const outside = (scan, dismissed) => scan && !scan.error
-  ? [...scan.worktrees, ...scan.sessions].filter((item) => !dismissed.includes(keyOf(item)) && !(item.path && isStale(item)))
+  ? [...scan.worktrees, ...scan.sessions].filter((item) => !dismissed.includes(keyOf(item)) && !(item.path && isStale(item)) && !failedKeys(scan).has(keyOf(item)))
   : []
 
 function SetupSummary({ config, project }) {
@@ -667,19 +679,23 @@ function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
     if (!count || running) return
     setRunning(true)
     const made = []
-    const failed = []
-    const step = async (key, args, pattern) => {
+    const failed = [] // what could not come in, with the error, for the Fix import brief
+    const step = async (item, args, pattern) => {
+      const key = keyOf(item)
       setProgress((p) => ({ ...p, [key]: 'busy' }))
       const r = await hub.grove(args)
       const name = pattern.exec(r.stdout)?.[1]
-      const ok = !r.code && name
-      setProgress((p) => ({ ...p, [key]: ok ? 'done' : (r.stderr || r.stdout).trim() || 'failed' }))
-      ok ? made.push(name) : failed.push(key)
+      const error = (r.stderr || r.stdout).trim() || 'failed'
+      setProgress((p) => ({ ...p, [key]: name && !r.code ? 'done' : error }))
+      if (name && !r.code) made.push(name)
+      else failed.push({ ...(item.path ? { path: item.path, branch: item.branch } : { id: item.id }), title: item.conversation?.title || item.title || '', error })
     }
-    for (const t of trees) await step(t.path, ['adopt', t.path, '--project', scan.project], /^([a-z0-9][a-z0-9._-]*): adopted /m)
-    for (const c of chats) await step(c.id, ['adopt', '--session', c.id], /^(s-[0-9a-f]{8}): /m)
+    for (const t of trees) await step(t, ['adopt', t.path, '--project', scan.project], /^([a-z0-9][a-z0-9._-]*): adopted /m)
+    for (const c of chats) await step(c, ['adopt', '--session', c.id], /^(s-[0-9a-f]{8}): /m)
     setRunning(false)
-    if (!failed.length) onDone(made, { trees: trees.length, chats: chats.length }, items.map(keyOf).filter((k) => !picked.has(k)))
+    // whatever came in is ready to use; what didn't is kept for Fix with Claude, not left on screen
+    onDone(made, { trees: trees.length - failed.filter((x) => x.path).length, chats: chats.length - failed.filter((x) => x.id).length },
+      items.map(keyOf).filter((k) => !picked.has(k)), failed)
   }
 
   const status = (key) => {
@@ -760,7 +776,85 @@ function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
             </button>
           )}
           <button className="btn" type="button" disabled={running} onClick={() => onClose(items.map(keyOf))}>{items.length ? 'Not now  esc' : 'Close  esc'}</button>
-          {Object.values(progress).some((v) => v !== 'busy' && v !== 'done') && !running && <span className="sheet-error">Some could not come in; the rest did. Retry, or close.</span>}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+// ---------- what could not come in: shown, then handed to a briefed Claude session on request ----------
+function FixSheet({ project, onClose, onStarted, onChanged }) {
+  const [draft, setDraft] = useState(null)
+  const [brief, setBrief] = useState('')
+  const [starting, setStarting] = useState(false)
+  const [error, setError] = useState('')
+  const load = useCallback(async () => {
+    const r = await hub.grove(['fix-import', '--project', project, '--draft', '--json'])
+    try {
+      const d = JSON.parse(r.stdout)
+      setDraft(d)
+      setBrief(d.brief)
+    } catch { setError((r.stderr || r.stdout).trim() || 'could not read what failed') }
+  }, [project])
+  useEffect(() => { load() }, [load])
+  const fixable = draft ? draft.failures.filter((x) => x.fixable) : []
+  const start = async () => {
+    if (!brief.trim() || starting) return
+    setStarting(true)
+    const r = await hub.grove(['fix-import', '--project', project, '--start', '-p', brief])
+    setStarting(false)
+    const name = /^([a-z0-9][a-z0-9._-]*): /m.exec(r.stdout)?.[1]
+    if (r.code || !name) return setError((r.stderr || r.stdout).trim())
+    onStarted(name)
+  }
+  const forget = async (key) => {
+    await hub.grove(['fix-import', '--project', project, '--forget', key])
+    onChanged()
+    load()
+  }
+  return (
+    <div className="sheet-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <section className="sheet" role="dialog" aria-modal="true" aria-labelledby="fix-title"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose()
+          if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); start() }
+        }}>
+        <h1 id="fix-title">Fix what couldn't come in</h1>
+        {!draft && !error && <p className="busy">Looking at what failed…</p>}
+        {draft && (
+          <>
+            <ul className="picks">
+              {draft.failures.map((x) => (
+                <li key={keyOf(x)}>
+                  <div className="pick on">
+                    <span className="pick-text">
+                      <span className="pick-title">{x.title || (x.path ? humanize(x.branch || x.path) : `Conversation ${x.id.slice(0, 8)}`)}</span>
+                      <span className="pick-sub">{x.path ? `⎇ ${x.branch} · ${home(x.path)}` : `◷ conversation ${x.id.slice(0, 8)}`}</span>
+                      <span className="fail-error">✗ {(x.error || '').split('\n').filter(Boolean).slice(-1)[0]}</span>
+                      {!x.fixable && <span className="tags"><span className="tag">can't come in: {x.why}</span></span>}
+                    </span>
+                    {!x.fixable && <button className="btn" type="button" onClick={() => forget(keyOf(x))}>Forget it</button>}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {fixable.length > 0 ? (
+              <>
+                <label className="brief-label" htmlFor="fix-brief">What Claude will be asked <span>edit it if you like; it starts only when you say so</span></label>
+                <textarea id="fix-brief" className="doc-text brief" value={brief} onChange={(e) => setBrief(e.target.value)} spellCheck={false} autoFocus />
+                <p className="hint">Claude works in its own session, <b>Fix import</b>, under Sessions in the sidebar. It asks before changing anything, as Claude Code always does, and is told to leave your code, worktrees and branches alone.</p>
+              </>
+            ) : draft.failures.length === 0 ? <p className="sheet-sub">Everything that failed is in Grove now.</p> : null}
+          </>
+        )}
+        {error && <p className="sheet-error">{error}</p>}
+        <div className="sheet-actions">
+          {fixable.length > 0 && (
+            <button className="btn primary" type="button" disabled={starting || !brief.trim()} onClick={start}>
+              {starting ? 'Starting…' : 'Start fixing with Claude  ⌘↩'}
+            </button>
+          )}
+          <button className="btn" type="button" onClick={onClose}>{fixable.length ? 'Not now  esc' : 'Close  esc'}</button>
         </div>
       </section>
     </div>
@@ -787,6 +881,7 @@ function App() {
   // work on this repo that Grove is not running yet (grove import --json), and what was set aside
   const [scan, setScan] = useState(null)
   const [sheet, setSheet] = useState(false)
+  const [fixing, setFixing] = useState(false)
   const [dismissed, setDismissed] = useState(() => {
     try { return JSON.parse(localStorage.getItem(`dismissed:${hub.project}`) || '[]') } catch { return [] }
   })
@@ -980,7 +1075,8 @@ function App() {
       <Sidebar project={state.project} repo={state.repo || ''} elsewhere={Object.values(state.waitingElsewhere || {}).reduce((a, b) => a + b, 0)} features={features} current={f?.name} onPick={(n) => { setCurrent(n); setZoom(null) }} onMenu={rowMenu}
         renaming={renaming} setRenaming={setRenaming} onRename={rename}
         newOpen={newOpen} setNewOpen={(v) => { if (!v) setSeed(''); setNewOpen(v) }} seed={seed} onCreate={create} creating={creating} filterRef={filterRef}
-        waitingOutside={outside(scan, dismissed).length} onReview={() => review()} />
+        waitingOutside={outside(scan, dismissed).length} onReview={() => review()}
+        failedCount={scan?.failures?.length || 0} onFix={() => setFixing(true)} />
       <main className="main">
         {!f && (
           <div className="empty">
@@ -1054,14 +1150,21 @@ function App() {
       {sheet && scan && !scan.error && (
         <ImportSheet scan={scan} justAdded={hub.review && !features.length} dismissed={dismissed}
           onClose={(keys) => { setAside(keys); setSheet(false) }}
-          onDone={(made, counts, skipped) => {
+          onDone={async (made, counts, skipped, failed) => {
             setAside(skipped)
             setSheet(false)
+            if (failed.length) await hub.grove(['fix-import', '--project', scan.project, '--record', JSON.stringify(failed)])
             rescan()
             if (made[0]) { setCurrent(made[0]); setZoom(null) }
-            say(`Brought in ${[counts.trees && plural(counts.trees, 'worktree'), counts.chats && plural(counts.chats, 'conversation')].filter(Boolean).join(' and ')}.`
-              + (counts.chats ? ' Type /exit where each conversation runs now, then press Enter in its panel.' : ''))
+            const brought = [counts.trees && plural(counts.trees, 'worktree'), counts.chats && plural(counts.chats, 'conversation')].filter(Boolean).join(' and ')
+            say([brought && `Brought in ${brought}.`,
+              failed.length && `${failed.length} couldn't come in: “Fix with Claude” in the sidebar shows why and can sort it out.`,
+              counts.chats > 0 && 'Type /exit where each conversation runs now, then press Enter in its panel.'].filter(Boolean).join(' '), failed.length > 0 && !made.length)
           }} />
+      )}
+      {fixing && scan && (
+        <FixSheet project={scan.project} onClose={() => setFixing(false)} onChanged={rescan}
+          onStarted={(name) => { setFixing(false); setCurrent(name); setZoom(null); rescan() }} />
       )}
       {toast && <div className={`toast ${toast.isError ? 'error' : ''}`} role="status">{toast.text}</div>}
     </div>
