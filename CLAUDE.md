@@ -64,13 +64,14 @@ mod reports from inside each Claude session; tmux hosts every process (`grove_<f
   never prints an empty line in app mode.
 - A Claude conversation can only be resumed from the folder it started in (transcripts are stored per
   folder under `~/.claude/projects/`), so session rows keep their original path.
+- A feature shows `offline` when the Claude pid in its status.json is gone or the status predates the last
+  boot (`session_live` in the CLI, `sessionLive` in main.js; no process is started). A status without a pid
+  is trusted until the next reboot.
 - `grove adopt` rewrites a worktree's env files to its new ports; services start stopped.
 - Offscreen Electron `capturePage` can return the previous frame: settle (two rAFs + a beat) and capture twice.
 
 ## Open items
 
-- After a reboot, features keep their last state (⏳/❗) until their session restarts — show `offline`
-  when no live Claude session exists.
 - Numos config should move into the numosai repo as a committed `.grove.json` (needs a PR there).
 - Teammates can't open the repo yet (private on a personal account): invite them or make it public.
 - Pitch video (`~/Desktop/Grove-pitch-music.mp4`): source and renderer were in a session scratchpad; if it

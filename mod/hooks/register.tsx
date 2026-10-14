@@ -38,7 +38,8 @@ type Registered = {
 const portsOf = (one: Registered): Record<string, number> =>
   one.ports ?? Object.fromEntries(Object.entries({ be: one.bePort, fe: one.fePort }).filter(([, v]) => v !== undefined)) as Record<string, number>
 type Summary = { work: string; now: string; next: string }
-type Status = { state: FeatureState; message: string; updatedAt: number; details?: Record<string, unknown> } & Partial<Summary>
+// pid: this session's Claude process, so grove and the app can show offline once it is gone
+type Status = { state: FeatureState; message: string; updatedAt: number; pid?: number; details?: Record<string, unknown> } & Partial<Summary>
 type Git = { dirty: number; ahead: number; behind: number; stage: number | null; changed: string[] }
 
 // the feature's lifecycle, as statusline-feature.sh tracked it; colours are xterm-256 fills
@@ -86,6 +87,12 @@ let details: Record<string, unknown> = {}
 let lastMessage = ''
 let turnStartedAt = 0
 let lastWaitMessage = ''
+let claudePid: number | undefined
+
+// the Claude process running this module: the nearest `claude` above a shell it starts (asked once per session)
+const FIND_CLAUDE = 'p=$PPID; while [ "${p:-1}" -gt 1 ]; do '
+  + 'case "$(ps -o comm= -p "$p")" in claude|*/claude) echo "$p"; exit 0;; esac; '
+  + 'p=$(ps -o ppid= -p "$p" | tr -d " "); done'
 
 function run($: EngineInterface, argv: string[]) {
   return $.process.run(argv, { timeoutMs: 300_000 }).catch(error => ({
@@ -93,6 +100,13 @@ function run($: EngineInterface, argv: string[]) {
     stdout: '',
     stderr: String(error),
   }))
+}
+
+async function findClaudePid($: EngineInterface): Promise<number | undefined> {
+  const found = await run($, ['sh', '-c', FIND_CLAUDE])
+  const pid = Number.parseInt(found.stdout.trim(), 10)
+
+  return Number.isInteger(pid) && pid > 1 ? pid : undefined
 }
 
 async function notify($: EngineInterface, title: string, message: string) {
@@ -203,7 +217,7 @@ async function writeStatus($: EngineInterface, message?: string) {
   if (message !== undefined) {
     lastMessage = message
   }
-  const status: Status = { state: myState, message: lastMessage, updatedAt: await $.clock.now(), ...summary, details }
+  const status: Status = { state: myState, message: lastMessage, updatedAt: await $.clock.now(), pid: claudePid, ...summary, details }
   // a feature closed under a live session (grove done) keeps no folder: writing would bring it back
   const open = await $.fs.read(`${me.dir}/feature.json`).then(() => true, () => false)
   if (open) {
@@ -521,6 +535,7 @@ export const register: Register = on => {
     if (me !== undefined) {
       const previous = await $.fs.read(`${me.dir}/status.json`).then(parse<Status>, () => undefined)
       summary = { work: previous?.work ?? '', now: previous?.now ?? '', next: previous?.next ?? '' }
+      claudePid = await findClaudePid($)
       if (pane !== undefined) {
         await run($, ['tmux', 'set-option', '-w', '-t', pane, '@grove_feature', me.name])
       }

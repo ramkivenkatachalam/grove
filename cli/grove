@@ -251,6 +251,34 @@ def status_of(f: dict) -> dict:
     return read_json(feature_dir(f) / "status.json", {})
 
 
+STALE = "no Claude session running"
+
+
+def booted_at() -> float:
+    """When this machine last started, in epoch seconds (macOS's CLOCK_MONOTONIC counts through sleep)."""
+    return time.time() - time.clock_gettime(getattr(time, "CLOCK_BOOTTIME", time.CLOCK_MONOTONIC))
+
+
+def session_live(status: dict) -> bool:
+    """Whether the Claude session that wrote this status still runs, without starting a process: its
+    pid (the mod writes it) must be alive, and nothing written before the last boot counts. A status
+    without a pid (a session on a mod from before pids) is trusted until the next reboot."""
+    if (status.get("updatedAt") or 0) / 1000 < booted_at():
+        return False
+    pid = status.get("pid")
+    return pid_alive(pid) if isinstance(pid, int) and pid > 1 else True
+
+
+def shown_status(f: dict) -> dict:
+    """The status to show: offline once no live Claude session is left to update it (a reboot, a crash,
+    a killed tmux server). The last question or permission prompt no longer stands; the recap does."""
+    status = status_of(f)
+    if status.get("state", "offline") == "offline" or session_live(status):
+        return status
+    details = {**(status.get("details") or {}), "note": "", "nextStep": "start Claude in the feature (claude --continue)"}
+    return {**status, "state": "offline", "message": STALE, "details": details}
+
+
 def ports(f: dict) -> dict[str, int]:
     if "ports" in f:
         return f["ports"]
@@ -1452,7 +1480,7 @@ def cmd_ls() -> None:
     pr_sync()
     print(f"{'FEATURE':<22} {'PROJECT':<12} {'SERVICES':<24} {'LABELS':<14} {'PR':<15} {'STATE':<8} WORK → NEXT")
     for f in regs:
-        status = status_of(f)
+        status = shown_status(f)
         work = " → ".join(x for x in (status.get("work"), status.get("next")) if x) or "-"
         svcs = " ".join(f"{s}:{port}{'●' if port in live else '○'}" for s, port in ports(f).items()) or "-"
         try:
@@ -2044,9 +2072,11 @@ def cmd_statusline() -> None:
             os.execvp("bash", ["bash", "-c", f"printf '%s' {shlex.quote(raw)} | {shlex.quote(str(legacy))}"])
         return
     index = {}
-    for line in tmux("list-windows", "-t", SESSION, "-F", "#I\t#W").stdout.splitlines():
-        i, _, w = line.partition("\t")
+    painted = {}
+    for line in tmux("list-windows", "-t", SESSION, "-F", "#I\t#W\t#{window_id}\t#{@grove_fill}\t#{@grove_attn}").stdout.splitlines():
+        i, w, wid, fill, attn = (line.split("\t") + [""] * 5)[:5]
         index[w] = i
+        painted[w] = (wid, fill, attn)
     pal = theme()
 
     def fg(hexcolour: str) -> str:
@@ -2061,15 +2091,36 @@ def cmd_statusline() -> None:
             "working": ("⏳", "working", pal["working"]), "offline": ("·", "offline", "#a8a8a8")}
     parts = []
     for f in regs:
-        st = status_of(f).get("state", "offline")
+        status = shown_status(f)
+        st = status.get("state", "offline")
+        if st == "offline" and status.get("message") == STALE and f["name"] in painted:
+            paint_offline(f, *painted[f["name"]], pal)
         glyph, word, colour = look.get(st, look["offline"])
         num = index.get(f["name"], "?")
         if f is here:
             parts.append(f"{bg(pal['name'])}\033[1;30m ▶ {num} {f['name']} \033[0m")
         else:
-            label = f" {word}" if st in ("waiting", "ready") else ""
+            label = f" {word}" if st in ("waiting", "ready", "offline") else ""
             parts.append(f"{fg(colour)}{num} {glyph} {f['name']}{label}\033[0m")
     print("  ".join(parts) + f"   {fg('#a8a8a8')}^b n switch · ^b F pick · ^b N new\033[0m")
+
+
+OFFLINE_FILL = "#a8a8a8"
+
+
+def paint_offline(f: dict, window: str, fill: str, attn: str, pal: dict) -> None:
+    """tmux UI: a window whose Claude is gone without saying so (a crash) still shows the header and flag
+    it last painted; say offline instead. The mod repaints it all when a session starts there again."""
+    if fill == OFFLINE_FILL and not attn:
+        return
+    esc = lambda text: text.replace("#", "##")
+    on = lambda fg, extra="": f"#[bg={pal['band']} fg={fg}{' ' + extra if extra else ''}]"
+    row1 = (f"#[bg={pal['name']} fg=#000000 bold] {esc(f['name'])} {on('#bcbcbc', 'nobold')}  "
+            f"#[bg={OFFLINE_FILL} fg=#000000 bold] · OFFLINE {on('#bcbcbc', 'nobold')}  no Claude session running"
+            f"#[align=right]{on(pal['accent'], 'bold')}NEXT ▸ {on('#eeeeee', 'bold')}start Claude in its pane (claude --continue) ")
+    tmux("set-option", "-w", "-t", window, "@grove_h1", row1, ";",
+         "set-option", "-w", "-t", window, "@grove_fill", OFFLINE_FILL, ";",
+         "set-option", "-w", "-t", window, "@grove_attn", "")
 
 
 def parse_json(text: str) -> dict:
