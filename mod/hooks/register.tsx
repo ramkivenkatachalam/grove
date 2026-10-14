@@ -462,6 +462,10 @@ async function setState($: EngineInterface, state: FeatureState, message = '') {
     // keep the Mac awake while any agent works; the watcher lets go once none do
     await run($, [fh, 'keepawake'])
   }
+  if (state === 'ready') {
+    // a turn ended: refresh the feature's recap (detached; fh spaces these out and skips if nothing changed)
+    await run($, [fh, 'recap', me.name, '--bg'])
+  }
   if (state === 'waiting') {
     // a desktop notification, unless you are looking at this window
     const seen = pane === undefined

@@ -60,6 +60,8 @@ State lives in `~/.grove/`, one folder per project and per feature:
 ~/.grove/projects/<project>/<feature>/feature.json   registry entry
                                      /status.json    session state, written by the mod
                                      /brief.md       the task, until the agent picks it up
+                                     /recap.json     the Summary tab's recap (grove recap)
+                                     /notes.md  retro.md   the Notes and Retro tabs
                                      /worktree/      the feature's git worktree
 ```
 
@@ -112,6 +114,7 @@ to start a second Claude on a worktree that already has one.
 | `grove doctor` | Check projects and features: files, deps, ports, env, labels |
 | `grove project add\|ls\|default\|show` | Manage projects |
 | `grove pr` · `grove findings <name>` | Refresh PR/CI · list unanswered review-bot findings |
+| `grove recap <name> [--force]` | A scannable recap of a feature (goal, done, now, next, decisions, blockers) for its Summary tab. Sessions refresh it after each turn, at most every 3 minutes, and skip when nothing changed |
 | `grove keepawake [on\|off\|--status]` | Keeps the Mac awake while any agent is working (sessions start it; it lets go when all are idle). `off` turns it off |
 | `grove theme [palette]` · `grove ui app\|tmux` | Header palette · which front end new features open in |
 

@@ -74,6 +74,7 @@ function allFeatures() {
       project: f.project || path.basename(path.dirname(dir)),
       title: f.title || f.name,
       status: readJSON(path.join(dir, 'status.json'), { state: 'offline' }),
+      recap: readJSON(path.join(dir, 'recap.json'), null), // fh recap: goal, done, now, next…
       pr: prs[f.branch] || null,
     }))
     .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.name.localeCompare(b.name))
@@ -242,9 +243,19 @@ ipcMain.handle('host', async (_e, name) => {
     return { error: (result.stderr || result.stdout).trim() }
   }
 })
-// a feature's notes and retro: markdown in the hub, kept out of the worktree (and so out of git)
-const DOCS = { notes: 'notes', retro: 'retros' }
-const docFile = (kind, name) => DOCS[kind] && /^[\w.-]+$/.test(name) && !name.startsWith('.') ? path.join(HUB, DOCS[kind], name + '.md') : null
+// a feature's own folder in the hub (projects/<project>/<name>), found by name: names are unique
+function featureDir(name) {
+  if (!/^[\w.-]+$/.test(name) || name.startsWith('.')) return null
+  const project = folders(PROJECTS).find((p) => fs.existsSync(path.join(PROJECTS, p, name, 'feature.json')))
+  return project ? path.join(PROJECTS, project, name) : null
+}
+
+// a feature's notes and retro: markdown in its hub folder, kept out of the worktree (and so out of git)
+const DOCS = { notes: 'notes.md', retro: 'retro.md' }
+const docFile = (kind, name) => {
+  const dir = DOCS[kind] && featureDir(name)
+  return dir ? path.join(dir, DOCS[kind]) : null
+}
 ipcMain.handle('doc:read', (_e, kind, name) => {
   const file = docFile(kind, name)
   try {
@@ -263,10 +274,10 @@ ipcMain.handle('doc:write', (_e, kind, name, text) => {
 })
 // the task a feature was started with (fh new -p / a ticket), before or after Claude was handed it
 ipcMain.handle('brief', (_e, name) => {
-  if (!/^[\w.-]+$/.test(name)) return ''
-  for (const file of [name + '.md', name + '.sent.md']) {
+  const dir = featureDir(name)
+  for (const file of dir ? ['brief.md', 'brief.sent.md'] : []) {
     try {
-      return fs.readFileSync(path.join(HUB, 'briefs', file), 'utf8')
+      return fs.readFileSync(path.join(dir, file), 'utf8')
     } catch {}
   }
   return ''

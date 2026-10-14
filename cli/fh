@@ -20,6 +20,9 @@ per feature, for any project described by a project config (see `fh project`).
   fh doctor              check projects and features: files, deps, ports, env, labels
   fh keepawake [--status|off|on]   keep the Mac awake while any agent is working (Claude
                          sessions start it; it lets go once none are)
+  fh recap <name> [--force] [--bg]   a scannable recap of the feature's work (goal, done, now, next,
+                         decisions, blockers), written to its recap.json; sessions refresh it after
+                         each turn, at most every few minutes; --bg returns at once
 
   fh project ls                       projects and which one is the default
   fh project add <repo> [--name N]    register a repo (reads its .grove.json, or writes a starter)
@@ -37,6 +40,8 @@ Everything lives under ~/.grove, one folder per project and per feature:
   ~/.grove/projects/<project>/<feature>/feature.json  the registry entry
                                        /status.json   written by the Claude Code mod
                                        /brief.md      the task, until the agent picks it up
+                                       /recap.json    goal, done, now, next… (fh recap)
+                                       /notes.md  retro.md   yours, from the app
                                        /worktree/     the git worktree (a link for features made elsewhere)
 """
 from __future__ import annotations
@@ -58,6 +63,8 @@ PROJECTS = HUB / "projects"
 PRS, FEEDBACK, CONFIG, THEME = HUB / "prs.json", HUB / "feedback.json", HUB / "config.json", HUB / "theme.json"
 AWAKE = HUB / "keepawake.pid"
 AWAKE_POLL = 30
+RECAP_GAP = 180  # seconds between automatic recaps of one feature
+RECAP_MODEL = "haiku"
 FH = os.environ.get("GROVE_BIN", str(HUB / "bin/fh"))
 SESSION = "features"
 PARK = "fh-park"  # tmux UI: a detached session where closed panels keep running
@@ -1096,6 +1103,158 @@ def cmd_keepawake(args: list[str]) -> None:
     print(f"keepawake: {state}")
 
 
+RECAP_SYSTEM = """You keep a recap of one coding feature that its developer scans in seconds.
+Reply with JSON only, no prose and no code fence:
+{"goal": "...", "done": ["..."], "now": "...", "next": ["..."], "decisions": ["..."], "blockers": ["..."]}
+- goal: what the feature is for, at most 10 words
+- done: finished work, oldest first
+- now: what is happening at this moment, at most 8 words
+- next: the next concrete steps, most urgent first
+- decisions: choices made that someone picking this up must know
+- blockers: what stops progress or waits on the developer; [] when nothing does
+Write fragments, not sentences: no "I", no "we", no trailing periods. At most 8 words per item and
+5 items per list, the most important kept. Keep the previous recap's wording for items that still hold,
+drop what is no longer true, never invent anything the material does not show."""
+
+
+def transcript_of(f: dict) -> Path | None:
+    """The Claude conversation behind a feature: its own for a session, else the latest in its worktree."""
+    if f.get("kind") == "session":
+        return next(TRANSCRIPTS.glob(f"*/{f['session']}.jsonl"), None)
+    rows = sorted((TRANSCRIPTS / mangle(f["path"])).glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+    return rows[-1] if rows else None
+
+
+def conversation(path: Path) -> tuple[str, str]:
+    """The first request and the latest exchanges of a transcript, as short plain lines."""
+    task, lines = "", []
+    with path.open() as fh_:
+        for raw in fh_:
+            if '"type":"user"' not in raw and '"type":"assistant"' not in raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue
+            if row.get("type") not in ("user", "assistant") or row.get("isMeta") or row.get("isSidechain"):
+                continue
+            content = (row.get("message") or {}).get("content")
+            blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content or []
+            blocks = [b for b in blocks if isinstance(b, dict)]
+            text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+            if row["type"] == "user":
+                if text and not text.startswith("<"):  # tool results and harness notes are not requests
+                    task = task or text
+                    lines.append(f"developer: {text[:600]}")
+                continue
+            if text:
+                lines.append(f"claude: {text[:600]}")
+            tools = [b.get("name", "") for b in blocks if b.get("type") == "tool_use"]
+            if tools:
+                lines.append(f"  (used {', '.join(tools)})")
+    return task[:1500], "\n".join(lines)[-12000:]
+
+
+def git_facts(f: dict) -> dict:
+    """What git says about the feature: its commits since the base, the files it touches, its HEAD."""
+    path = f["path"]
+    base = project_of(f).get("base") or "origin/main"
+    if run(["git", "-C", path, "rev-parse", "-q", "--verify", base]).returncode:
+        base = "main"
+    commits = run(["git", "-C", path, "log", "--format=%s", f"{base}..HEAD"]).stdout.splitlines()
+    committed = run(["git", "-C", path, "diff", "--name-only", f"{base}...HEAD"]).stdout.splitlines()
+    dirty = [ln[3:] for ln in run(["git", "-C", path, "status", "--porcelain"]).stdout.splitlines()]
+    head = run(["git", "-C", path, "rev-parse", "HEAD"]).stdout.strip()
+    return {"commits": commits, "files": sorted(set(committed) | set(dirty)), "dirty": len(dirty), "head": head}
+
+
+def write_recap(f: dict, prev: dict, force: bool) -> tuple[dict, str]:
+    """Ask a small model for the recap; returns it and what happened."""
+    t = transcript_of(f)
+    g = git_facts(f)
+    source = f"{t.stat().st_size if t else 0}:{g['head']}:{g['dirty']}"
+    if not force and prev.get("source") == source:
+        return prev, "up to date"
+    task, tail = conversation(t) if t else ("", "")
+    brief = next((p.read_text() for p in (feature_dir(f) / "brief.md", feature_dir(f) / "brief.sent.md") if p.exists()), "")
+    commits = "\n".join(f"- {c}" for c in g["commits"][:20]) or "none"
+    files = ", ".join(g["files"][:15]) + (f" (+{len(g['files']) - 15} more)" if len(g["files"]) > 15 else "")
+    old = {k: prev[k] for k in ("goal", "done", "now", "next", "decisions", "blockers") if k in prev}
+    prompt = (f"Feature: {f['name']}{' (' + f['ticket'] + ')' if f.get('ticket') else ''} — {f.get('title') or f['name']}\n\n"
+              f"Task as given:\n{(brief or task)[:1500] or 'not recorded'}\n\n"
+              f"Commits on the branch:\n{commits}\n\nFiles touched: {files or 'none'}\n\n"
+              f"Previous recap: {json.dumps(old) if old else 'none'}\n\n"
+              f"Conversation, latest last:\n{tail or 'none yet'}")
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_PLUGIN_DIRS"}
+    try:
+        # no user settings (so no Grove mod or hooks in this side call), no tools, nothing saved
+        r = subprocess.run(["claude", "-p", "--setting-sources", "project", "--model", RECAP_MODEL, "--tools", "",
+                            "--strict-mcp-config", "--no-session-persistence", "--output-format", "text",
+                            "--system-prompt", RECAP_SYSTEM], input=prompt, text=True, capture_output=True,
+                           cwd=HUB, env=env, timeout=180)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return prev, f"failed: {e}"
+    m = re.search(r"\{[\s\S]*\}", r.stdout)
+    try:
+        got = json.loads(m.group(0)) if m else None
+    except ValueError:
+        got = None
+    if not isinstance(got, dict):
+        return prev, f"failed: {(r.stderr or r.stdout).strip()[:200] or 'no JSON in the reply'}"
+
+    def tidy(value, width: int) -> str:
+        return " ".join(str(value).split())[:width].rstrip(" .")
+
+    def items(key: str) -> list[str]:
+        rows = got.get(key) if isinstance(got.get(key), list) else []
+        return [tidy(x, 70) for x in rows if str(x).strip()][:5]
+
+    recap = {"goal": tidy(got.get("goal") or prev.get("goal", ""), 90), "done": items("done"),
+             "now": tidy(got.get("now") or "", 70), "next": items("next"), "decisions": items("decisions"),
+             "blockers": items("blockers"), "commits": len(g["commits"]), "files": len(g["files"]),
+             "updatedAt": int(time.time() * 1000), "source": source}
+    write_json(feature_dir(f) / "recap.json", recap)
+    return recap, "written"
+
+
+def cmd_recap(args: list[str]) -> None:
+    names = [a for a in args if not a.startswith("--")]
+    if not names:
+        die("recap <name> [--force] [--bg]")
+    f = feature(names[0])
+    force = "--force" in args
+    if "--bg" in args:
+        # detached, so a session's turn never waits on it; it spaces itself out (--wait)
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "recap", f["name"], "--wait", *(["--force"] if force else [])],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        print(f"{f['name']}: recap on its way")
+        return
+    home = feature_dir(f)
+    home.mkdir(parents=True, exist_ok=True)
+    lock = home / "recap.lock"
+    try:
+        held = int(lock.read_text().strip())
+    except (OSError, ValueError):
+        held = None
+    if held and held != os.getpid() and pid_alive(held):
+        print(f"{f['name']}: a recap is already being written")
+        return
+    lock.write_text(str(os.getpid()))
+    try:
+        prev = read_json(home / "recap.json", {})
+        if "--wait" in args and not force:
+            # a trailing refresh: the last turn of a burst still gets its recap, just a little later
+            time.sleep(max(0.0, RECAP_GAP - (time.time() - prev.get("updatedAt", 0) / 1000)))
+        recap, what = write_recap(f, prev, force)
+    finally:
+        lock.unlink(missing_ok=True)
+    if what.startswith("failed"):
+        die(f"recap of {f['name']} {what}")
+    print(f"{f['name']}: recap {what}")
+    print(json.dumps({k: recap.get(k) for k in ("goal", "done", "now", "next", "decisions", "blockers")}, indent=2, ensure_ascii=False))
+
+
 def cmd_agent(name: str) -> None:
     f = feature(name)
     os.chdir(f["path"])
@@ -1565,6 +1724,8 @@ def main(argv: list[str]) -> None:
         cmd_doctor()
     elif cmd == "migrate":
         cmd_migrate()
+    elif cmd == "recap":
+        cmd_recap(rest)
     elif cmd == "keepawake":
         cmd_keepawake(rest)
     elif cmd == "attach":

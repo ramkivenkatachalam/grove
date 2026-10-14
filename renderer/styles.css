@@ -132,3 +132,18 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .facts-list a:hover { text-decoration: underline; }
 .summary h2 { font-size: 13px; color: var(--accent); margin: 10px 0 0; }
 .task { margin: 0; white-space: pre-wrap; font: 12px/1.5 var(--mono); color: var(--text-2); background: #141414; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; }
+
+/* summary: the recap, in sections you can scan */
+.recap { display: flex; flex-direction: column; gap: 10px; padding-bottom: 6px; border-bottom: 1px solid #2a2a2a; }
+.recap-head { display: flex; align-items: baseline; gap: 12px; }
+.recap-goal { flex: 1; margin: 0; font-size: 16px; font-weight: 600; color: var(--text); }
+.summary h2.recap-goal { margin: 0; font-size: 16px; color: var(--text); }
+.recap-age { color: var(--text-3); font-size: 12px; white-space: nowrap; }
+.recap-error { margin: 0; color: #ff9b9b; }
+.recap-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 24px; }
+.recap-col { display: flex; flex-direction: column; gap: 12px; }
+.recap-block h3 { margin: 0 0 4px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-2); }
+.recap-block ul { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; }
+.recap-block li { color: var(--text); line-height: 1.35; }
+.recap-block li::marker { color: var(--text-3); }
+.recap-none { margin: 0; color: var(--text-3); }

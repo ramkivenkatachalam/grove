@@ -212,3 +212,17 @@ test('each feature reports into its own folder, whatever project it is in', asyn
   expect(JSON.parse(fake.files.get(`${HUB}/projects/zeta/beta/status.json`) ?? '{}').state).toBe('ready')
   expect(fake.files.has(`${HUB}/projects/acme/flux/status.json`)).toBe(false)
 })
+
+test('a finished turn asks fh to refresh the recap', async ($, on) => {
+  const fake = host(on)
+  on('turn.start', ($, e) => e)
+  on('turn.complete', () => ({ text: '' }))
+
+  await $.session.start({ cwd: WT, surface: null, isInteractive: true })
+  await $.turn.start({ turnId: 't1' } as never)
+  fake.commands.length = 0
+  await $.turn.complete({ turnId: 't1', answer: 'Added the button.', durationMs: 5, isAborted: false } as never)
+
+  expect(fake.status().state).toBe('ready')
+  expect(fake.commands).toContainEqual([`${HUB}/bin/fh`, 'recap', 'flux', '--bg'])
+})

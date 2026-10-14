@@ -234,7 +234,7 @@ function Header({ f, pal, panels, openList, onToggle, repo }) {
       </div>
       <div className="hrow">
         <span className="recap">
-          {f.status.work || <span>No recap yet — it appears after Claude’s first turn</span>}
+          {f.status.work || f.recap?.goal || <span>No recap yet — it appears after Claude’s first turn</span>}
           {f.status.work && f.status.now && <span> — {f.status.now}</span>}
         </span>
         <span className="grow" />
@@ -418,6 +418,66 @@ const taskOf = (brief) => {
   return (m ? m[1] : brief).trim()
 }
 
+const ago = (ms) => {
+  const s = Math.max(0, (Date.now() - ms) / 1000)
+  return s < 60 ? 'just now' : s < 3600 ? `${Math.floor(s / 60)} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : `${Math.floor(s / 86400)} d ago`
+}
+
+// one recap section: an icon and a word (never colour alone), then fragments to scan
+function RecapList({ glyph, word, items, colour, empty }) {
+  if (!items.length && !empty) return null
+  return (
+    <div className="recap-block">
+      <h3 style={colour ? { color: colour } : undefined}><span aria-hidden="true">{glyph}</span> {word}</h3>
+      {items.length ? <ul>{items.map((x, i) => <li key={i}>{x}</li>)}</ul> : <p className="recap-none">{empty}</p>}
+    </div>
+  )
+}
+
+// the feature at a glance, written by `fh recap` after Claude's turns (or now, with Refresh)
+function Recap({ f, pal }) {
+  const r = f.recap
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 30000) // keeps "n min ago" honest
+    return () => clearInterval(t)
+  }, [])
+  useEffect(() => setError(''), [f.name])
+  const refresh = async () => {
+    setBusy(true)
+    setError('')
+    const res = await hub.fh(['recap', f.name, '--force'])
+    setBusy(false)
+    if (res.code) setError((res.stderr || res.stdout).trim().replace(/^fh: /, ''))
+  }
+  const list = (v) => (Array.isArray(v) ? v : [])
+  return (
+    <section className="recap" aria-label="Recap">
+      <div className="recap-head">
+        <h2 className="recap-goal">{r?.goal || 'No recap yet'}</h2>
+        {r?.updatedAt && <span className="recap-age">updated {ago(r.updatedAt)}</span>}
+        <button className="btn" onClick={refresh} disabled={busy} aria-label="Refresh the recap">{busy ? '↻ Refreshing…' : '↻ Refresh'}</button>
+      </div>
+      {error && <p className="recap-error" role="alert">Could not refresh: {error}</p>}
+      {r ? (
+        <div className="recap-grid">
+          <RecapList glyph="✓" word="Done" items={list(r.done)} colour={pal.ready} empty="nothing finished yet" />
+          <div className="recap-col">
+            <RecapList glyph="▸" word="Now" items={r.now ? [r.now] : []} colour={pal.working} />
+            <RecapList glyph="→" word="Next" items={list(r.next)} colour={pal.accent} />
+          </div>
+          <RecapList glyph="◆" word="Decisions" items={list(r.decisions)} />
+          <RecapList glyph="❗" word="Blockers" items={list(r.blockers)} colour={pal.waiting} empty="none" />
+        </div>
+      ) : (
+        <p className="busy">{busy ? 'Reading the conversation and git…' : 'Written after Claude’s next turn, or now with Refresh.'}</p>
+      )}
+    </section>
+  )
+}
+
 function SummaryTab({ f, repo, pal }) {
   const [brief, setBrief] = useState('')
   useEffect(() => {
@@ -437,8 +497,9 @@ function SummaryTab({ f, repo, pal }) {
   const link = (url, label) => <a role="link" tabIndex={0} onClick={() => hub.open(url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(url)}>{label}</a>
   const rows = [
     ['State', `${STATE[st].glyph} ${STATE[st].word}${d.note || f.status.message ? ` — ${d.note || f.status.message}` : ''}`],
-    ['Working on', f.status.work ? `${f.status.work}${f.status.now ? ` — ${f.status.now}` : ''}` : 'No recap yet — it appears after Claude’s first turn'],
-    ['Next', d.nextStep || f.status.next || 'give Claude its next instruction'],
+    // the recap above already says what it is on and what comes next
+    !f.recap && ['Working on', f.status.work ? `${f.status.work}${f.status.now ? ` — ${f.status.now}` : ''}` : 'No recap yet — it appears after Claude’s first turn'],
+    !f.recap && ['Next', d.nextStep || f.status.next || 'give Claude its next instruction'],
     f.kind !== 'session' && ['Stage', `${STAGES[stage]} (${stage + 1} of 8)${d.stage?.note ? ` — ${d.stage.note}` : ''}`],
     ['Branch', f.branch || '?'],
     ['Where', f.kind === 'session' ? placeOf(f.path, repo) : (f.path || '').replace(/^\/Users\/[^/]+/, '~')],
@@ -452,6 +513,8 @@ function SummaryTab({ f, repo, pal }) {
   const task = taskOf(brief)
   return (
     <div className="doc summary">
+      <Recap f={f} pal={pal} />
+      <h2>Facts</h2>
       <dl className="facts-list">
         {rows.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}
       </dl>
