@@ -76,6 +76,8 @@ sample() {  # sample [with-conversations]
   if [ "${1:-}" = with-conversations ]; then
     conversation "$REPO" 11111111-2222-3333-4444-555555555555 "Fix checkout totals rounding" 40
     conversation "$FAKE/code/acme-shop-csv-export" 22222222-3333-4444-5555-666666666666 "Add CSV export to orders" 130
+    mkdir -p "$REPO/.claude/worktrees/agent-1"  # Claude Code's own agent worktree: never offered
+    conversation "$REPO/.claude/worktrees/agent-1" 33333333-4444-5555-6666-777777777777 "" 50
   fi
   cd "$R"
 }

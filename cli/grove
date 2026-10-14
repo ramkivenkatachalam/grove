@@ -1004,10 +1004,14 @@ def transcript_info(path: Path) -> dict:
 
 def recent_sessions(p: dict, hours: float) -> list[dict]:
     """Claude conversations in the project's main checkout (or below it) touched in the last `hours`,
-    leaving out feature worktrees and sessions already in Grove."""
+    leaving out sessions already in Grove and anything run inside a worktree: a feature's, any other
+    git worktree of the repo (its conversation belongs to that worktree), or Claude Code's own agent
+    worktrees under .claude/worktrees."""
     repo = str(p["repo"])
-    taken = {f.get("session") for f in features()}
-    worktrees = [f["path"] for f in features() if f.get("kind") != "session"]
+    taken = {f["session"] for f in features() if f.get("session")}
+    listed = re.findall(r"^worktree (.+)$", run(["git", "-C", repo, "worktree", "list", "--porcelain"]).stdout, re.M)
+    worktrees = [f["path"] for f in features() if f.get("kind") != "session"] + [w for w in listed if w != repo]
+    worktrees.append(f"{repo}/.claude/worktrees")
     cutoff = time.time() - hours * 3600
     found = []
     for folder in TRANSCRIPTS.glob(mangle(repo) + "*"):

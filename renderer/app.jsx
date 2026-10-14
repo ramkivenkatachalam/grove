@@ -618,12 +618,16 @@ const humanize = (branch) => {
   const tail = branch.split('/').pop().replace(/[-_]+/g, ' ').trim()
   return tail.charAt(0).toUpperCase() + tail.slice(1)
 }
-// worth bringing in unless nothing has happened there for weeks and it holds no work of its own
-const isStale = (t) => !t.dirty && !t.ahead && (Date.now() / 1000 - t.at) > STALE_DAYS * 86400
+// quiet for weeks with nothing uncommitted: likely finished or abandoned (old branches are often
+// still "ahead" after a squash merge), so listed but not ticked
+const isStale = (t) => !t.dirty && (Date.now() / 1000 - t.at) > STALE_DAYS * 86400
+// a conversation is likely still going if it has a title and moved in the last day
+const isLive = (c) => Boolean(c.title) && (Date.now() / 1000 - c.at) < 86400
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
 const failedKeys = (scan) => new Set((scan?.failures || []).map(keyOf))
+const worthIt = (item) => (item.path ? !isStale(item) : isLive(item))
 const outside = (scan, dismissed) => scan && !scan.error
-  ? [...scan.worktrees, ...scan.sessions].filter((item) => !dismissed.includes(keyOf(item)) && !(item.path && isStale(item)) && !failedKeys(scan).has(keyOf(item)))
+  ? [...scan.worktrees, ...scan.sessions].filter((item) => !dismissed.includes(keyOf(item)) && worthIt(item) && !failedKeys(scan).has(keyOf(item)))
   : []
 
 function SetupSummary({ config, project }) {
@@ -660,7 +664,7 @@ function SetupSummary({ config, project }) {
 function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
   const items = [...scan.worktrees, ...scan.sessions]
   const [picked, setPicked] = useState(() => new Set(items
-    .filter((item) => !dismissed.includes(keyOf(item)) && !(item.path && isStale(item))).map(keyOf)))
+    .filter((item) => !dismissed.includes(keyOf(item)) && worthIt(item)).map(keyOf)))
   const [progress, setProgress] = useState({}) // key -> 'busy' | 'done' | error text
   const [running, setRunning] = useState(false)
   const first = useRef(null)
@@ -760,6 +764,7 @@ function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
                 <>
                   <span className="pick-title">{c.title || `Conversation ${c.id.slice(0, 8)}`}</span>
                   <span className="pick-sub">◷ {c.folder || 'main checkout'}{c.branch ? ` · ⎇ ${c.branch}` : ''} · {ago(c.at * 1000)}</span>
+                  {!isLive(c) && <span className="tags"><span className="tag">{c.title ? 'quiet for a day or more' : 'untitled: probably a quick one-off'}</span></span>}
                 </>
               )))}
             </ul>
