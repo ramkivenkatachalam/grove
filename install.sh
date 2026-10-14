@@ -75,10 +75,9 @@ link() {  # link <target in repo> <live path>
   echo "linked $2 -> $1"
 }
 link "$R/cli/grove" "$H/bin/grove"
-link "$R/cli/grove" "$H/bin/grove"  # the CLI's old name, kept so existing settings and habits still work
 link "$R/mod" "$H/mod"
 link "$R/tmux/grove.tmux.conf" "$H/tmux.conf"
-mkdir -p "$HOME/.local/bin" && ln -sfn "$R/cli/grove" "$HOME/.local/bin/grove" && ln -sfn "$R/cli/grove" "$HOME/.local/bin/fh"
+mkdir -p "$HOME/.local/bin" && ln -sfn "$R/cli/grove" "$HOME/.local/bin/grove"
 
 grep -q ".grove/tmux.conf" "$HOME/.tmux.conf" 2>/dev/null || echo "source-file $H/tmux.conf" >> "$HOME/.tmux.conf"
 

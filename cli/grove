@@ -204,7 +204,7 @@ def services(p: dict) -> list[dict]:
 
 
 def handle(p: dict) -> str:
-    who = os.environ.get("GROVE_USER") or os.environ.get("FH_USER")  # FH_USER: the name before Grove
+    who = os.environ.get("GROVE_USER")
     if who:
         return who
     email = run(["git", "-C", str(p["repo"]), "config", "user.email"]).stdout.strip()
@@ -213,7 +213,7 @@ def handle(p: dict) -> str:
 
 def fill(text: str, f: dict, port: int | None = None) -> str:
     """{port}, {<service>}, {name}, {path}, {grove} in config strings; anything else is left as written."""
-    values = {"name": f["name"], "path": f["path"], "grove": BIN, "fh": BIN, **{k: str(v) for k, v in ports(f).items()}}
+    values = {"name": f["name"], "path": f["path"], "grove": BIN, **{k: str(v) for k, v in ports(f).items()}}
     if port is not None:
         values["port"] = str(port)
     return re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), text)
@@ -469,27 +469,6 @@ def has_window(name: str) -> bool:
     if tmux("has-session", "-t", SESSION).returncode:
         return False
     return name in tmux("list-windows", "-t", SESSION, "-F", "#W").stdout.split()
-
-
-LEGACY = "fh"  # the CLI's name before Grove: its tmux sessions and options are renamed on first use
-
-
-def rename_legacy_tmux() -> None:
-    """Sessions and tmux options from before the rename (fh_*, fh-park, @fh_*) take Grove's names,
-    still running. Safe to re-run; does nothing once they are gone."""
-    names = tmux("list-sessions", "-F", "#{session_name}").stdout.split()
-    for old in names:
-        new = PARK if old == f"{LEGACY}-park" else "grove_" + old[len(LEGACY) + 1:] if old.startswith(f"{LEGACY}_") else None
-        if new and new not in names:
-            tmux("rename-session", "-t", f"={old}", new)
-    for scope, listing, keys in (("-p", "list-panes", ("owner", "pane", "hint")), ("-w", "list-windows", ("feature", "path"))):
-        fmt = "\t".join(["#{" + ("pane_id" if scope == "-p" else "window_id") + "}"] + [f"#{{@{LEGACY}_{k}}}" for k in keys])
-        for line in tmux(listing, "-a", "-F", fmt).stdout.splitlines():
-            target, *values = line.split("\t")
-            for key, value in zip(keys, values):
-                if value:
-                    tmux("set-option", scope, "-t", target, f"@grove_{key}", value)
-                    tmux("set-option", scope, "-u", "-t", target, f"@{LEGACY}_{key}")
 
 
 def owned_panes(name: str) -> list[dict]:
@@ -2102,9 +2081,6 @@ def parse_json(text: str) -> dict:
 
 def main(argv: list[str]) -> None:
     cmd, rest = (argv[0], argv[1:]) if argv else ("ls", [])
-    if cmd not in ("statusline", "keepawake", "agent", "serve"):  # the frequent, in-session ones
-        rename_legacy_tmux()
-
     def need(n: int, usage: str) -> None:
         if len(rest) < n:
             die(usage)

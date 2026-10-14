@@ -7,7 +7,7 @@ one git worktree per feature. README.md is the user-facing description; this fil
 
 | Piece | Source | Live location (symlinked to the source) |
 |---|---|---|
-| CLI `grove` (Python 3, **stdlib only**; `fh` is its old name, kept as an alias) | `cli/grove` | `~/.grove/bin/{grove,fh}`, `~/.local/bin/{grove,fh}` |
+| CLI `grove` (Python 3, **stdlib only**) | `cli/grove` | `~/.grove/bin/grove`, `~/.local/bin/grove` |
 | Claude Code mod (function hooks, TypeScript) | `mod/` | `~/.grove/mod`, loaded via `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json` |
 | Mac app (Electron 44 + React 19 + xterm.js 6) | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | `/Applications/Grove.app` (a built copy: rebuild to update) |
 | tmux front end | `tmux/grove.tmux.conf` | `~/.grove/tmux.conf`, sourced from `~/.tmux.conf` |
@@ -57,9 +57,6 @@ mod reports from inside each Claude session; tmux hosts every process (`grove_<f
   and beats `TMUX_TMPDIR`: a test that only sets `TMUX_TMPDIR` still drives the live server, and its
   `kill-server` stops every agent and service (it happened, twice). Use `env -u TMUX` / `unset TMUX` with
   `TMUX_TMPDIR`, or `tmux -S <socket>` on every call. The mod blocks the risky forms (`liveTmuxRisk`).
-- The CLI was called `fh` (feature hub) before Grove. Its tmux sessions (`fh_*`, `fh-park`) and options
-  (`@fh_*`) are renamed to `grove_*` by any `grove` command; Claude sessions started before the rename
-  keep writing `@fh_*` header options until they restart.
 - macOS `sleep infinity` exits at once — use `sleep 2147483647`.
 - tmux `set-option -t` takes a pane target: write `=<session>:` (with the colon) for a session.
 - zsh aborts a whole command line when a glob matches nothing (`rm -f 7-*.svg`): guard or avoid globs.
