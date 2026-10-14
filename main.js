@@ -311,6 +311,16 @@ ipcMain.handle('row-menu', (e, feature) => new Promise((resolve) => {
   ]
   Menu.buildFromTemplate(items).popup({ window: windowOf(e), callback: () => resolve(null) })
 }))
+// right-click on text in the Summary tab: hand the selection to this feature's agent, or edit it
+ipcMain.handle('selection-menu', (e, { picked, editable }) => new Promise((resolve) => {
+  const items = [
+    { label: 'Send to agent', accelerator: 'Cmd+Enter', enabled: picked, click: () => resolve('send') },
+    { label: 'New feature from selection…', accelerator: 'Shift+Cmd+Enter', enabled: picked, click: () => resolve('new') },
+    { type: 'separator' },
+    ...(editable ? [{ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { type: 'separator' }, { role: 'selectAll' }] : [{ role: 'copy', enabled: picked }]),
+  ]
+  Menu.buildFromTemplate(items).popup({ window: windowOf(e), callback: () => resolve(null) })
+}))
 ipcMain.on('reveal', (_e, dir) => shell.showItemInFolder(dir))
 ipcMain.handle('confirm', async (e, message, detail) => {
   const { response } = await dialog.showMessageBox(windowOf(e), { type: 'question', buttons: ['Close feature', 'Cancel'], defaultId: 1, cancelId: 1, message, detail })

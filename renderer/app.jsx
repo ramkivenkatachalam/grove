@@ -355,28 +355,9 @@ function SaveState({ saved, file }) {
 
 const docPath = (f, file) => `~/.grove/projects/${f.project}/${f.name}/${file}`
 
-// the scratchpad: your notes on the feature; any of it (or a selection) can start a feature or go to a session
-function Scratchpad({ f, features, onNew, say }) {
-  const [text, edit, saved] = useDoc('notes', f.name)
-  const area = useRef(null)
-  const [selected, setSelected] = useState(false)
-  const [target, setTarget] = useState(f.name)
-  const [sending, setSending] = useState(false)
-  useEffect(() => setTarget(f.name), [f.name])
-  const picked = () => {
-    const el = area.current
-    const part = el ? el.value.slice(el.selectionStart, el.selectionEnd).trim() : ''
-    return part || text.trim()
-  }
-  const send = async () => {
-    const t = picked()
-    if (!t) return
-    setSending(true)
-    const r = await hub.fh(['send', target, t])
-    setSending(false)
-    say((r.code ? r.stderr || r.stdout : r.stdout).trim().replace(/^fh: /, ''), Boolean(r.code))
-  }
-  const what = selected ? 'the selection' : 'the whole scratchpad'
+// the scratchpad: your notes on the feature, a place to draft things for Claude
+function Scratchpad({ f, doc }) {
+  const [text, edit, saved] = doc
   return (
     <section className="scratch" aria-label="Scratchpad">
       <div className="doc-bar">
@@ -384,23 +365,21 @@ function Scratchpad({ f, features, onNew, say }) {
         <span className="grow" />
         <SaveState saved={saved} file={docPath(f, 'notes.md')} />
       </div>
-      <textarea ref={area} className="doc-text scratch-text" spellCheck value={text} disabled={saved === 'loading'} aria-label="Scratchpad notes"
-        placeholder="Ideas, follow-ups, things to tell Claude. Select some and start a feature from it, or send it to a session (⌘↩)."
-        onChange={(e) => edit(e.target.value)}
-        onSelect={(e) => setSelected(e.target.selectionEnd > e.target.selectionStart)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); send() } }} />
-      <div className="scratch-actions">
-        <span className="scratch-what">With {what}:</span>
-        <button className="btn" type="button" disabled={!text.trim()} onClick={() => onNew(picked())}>＋ New feature from it</button>
-        <label className="scratch-to">Send to
-          <select value={target} onChange={(e) => setTarget(e.target.value)}>
-            {features.map((x) => <option key={x.name} value={x.name}>{x.name === f.name ? `${x.title} (this one)` : x.title}</option>)}
-          </select>
-        </label>
-        <button className="btn primary" type="button" disabled={!text.trim() || sending} onClick={send}>{sending ? 'Sending…' : 'Send ⌘↩'}</button>
-      </div>
+      <textarea className="doc-text scratch-text" spellCheck value={text} disabled={saved === 'loading'} aria-label="Scratchpad notes"
+        placeholder="Ideas, follow-ups, things to tell Claude. Select any text on this page and right-click: Send to agent (⌘↩) or New feature (⇧⌘↩)."
+        onChange={(e) => edit(e.target.value)} />
     </section>
   )
+}
+
+// the text selected anywhere inside root: in a text box (the one clicked, else the focused one), or on the page
+function selectionIn(root, target) {
+  if (!root) return ''
+  const el = target?.tagName === 'TEXTAREA' ? target : document.activeElement
+  if (el && el.tagName === 'TEXTAREA' && root.contains(el)) return el.value.slice(el.selectionStart, el.selectionEnd).trim()
+  const sel = window.getSelection()
+  if (!sel || sel.isCollapsed || !sel.rangeCount || !root.contains(sel.getRangeAt(0).commonAncestorContainer)) return ''
+  return sel.toString().trim()
 }
 
 // a retro is markdown with one ## section per question, so it reads well outside Grove too
@@ -540,8 +519,29 @@ function Recap({ f, pal }) {
   )
 }
 
-function SummaryTab({ f, repo, pal, features, say, onNew }) {
+function SummaryTab({ f, repo, pal, say, onNew }) {
   const [brief, setBrief] = useState('')
+  const notes = useDoc('notes', f.name)
+  const root = useRef(null)
+  const [sending, setSending] = useState(false)
+  // what is selected anywhere in the tab goes to this feature's Claude, or seeds a new feature
+  const act = async (choice, text) => {
+    if (!text) return say('Select some text first', true)
+    if (choice === 'new') return onNew(text)
+    if (sending) return
+    setSending(true)
+    const r = await hub.fh(['send', f.name, text])
+    setSending(false)
+    say((r.code ? r.stderr || r.stdout : r.stdout).trim().replace(/^fh: /, ''), Boolean(r.code))
+  }
+  const menu = async (e) => {
+    const text = selectionIn(root.current, e.target)
+    const editable = e.target.tagName === 'TEXTAREA' && !e.target.disabled
+    if (!text && !editable) return
+    e.preventDefault()
+    const choice = await hub.selectionMenu({ picked: Boolean(text), editable })
+    if (choice) act(choice, text)
+  }
   useEffect(() => {
     let live = true
     hub.brief(f.name).then((b) => live && setBrief(b))
@@ -574,7 +574,12 @@ function SummaryTab({ f, repo, pal, features, say, onNew }) {
   ].filter(Boolean)
   const task = taskOf(brief)
   return (
-    <div className="doc summary">
+    <div className="doc summary" ref={root} onContextMenu={menu} aria-busy={sending}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter' || !e.metaKey) return
+        e.preventDefault()
+        act(e.shiftKey ? 'new' : 'send', selectionIn(root.current))
+      }}>
       <Recap f={f} pal={pal} />
       <h2>Facts</h2>
       <dl className="facts-list">
@@ -582,8 +587,8 @@ function SummaryTab({ f, repo, pal, features, say, onNew }) {
       </dl>
       <h2>Task</h2>
       {task ? <pre className="task">{task}</pre> : <p className="busy">No task was given when this feature was created.</p>}
-      <Scratchpad key={`notes:${f.name}`} f={f} features={features} onNew={onNew} say={say} />
-      <RetroSection key={`retro:${f.name}`} f={f} say={say} />
+      <Scratchpad f={f} doc={notes} />
+      <RetroSection f={f} say={say} />
     </div>
   )
 }
@@ -782,7 +787,7 @@ function App() {
                 </section>
                 {tab !== 'claude' && (
                   <section className="tabpanel" id={`tabpanel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
-                    {tab === 'summary' && <SummaryTab f={f} repo={state.repo || ''} pal={pal} features={features} say={say}
+                    {tab === 'summary' && <SummaryTab key={f.name} f={f} repo={state.repo || ''} pal={pal} say={say}
                       onNew={(text) => { setSeed(text); setNewOpen(true) }} />}
                   </section>
                 )}

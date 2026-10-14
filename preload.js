@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('hub', {
   open: (url) => ipcRenderer.send('open', url),
   reveal: (dir) => ipcRenderer.send('reveal', dir),
   rowMenu: (feature) => ipcRenderer.invoke('row-menu', feature),
+  selectionMenu: (opts) => ipcRenderer.invoke('selection-menu', opts),
   projectMenu: (current) => ipcRenderer.invoke('project-menu', current),
   openProject: (name) => ipcRenderer.send('open-project', name),
   addProject: () => ipcRenderer.invoke('add-project'),

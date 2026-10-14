@@ -153,8 +153,6 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .summary .scratch h2, .summary .retro h2 { margin: 0; }
 .scratch-text { min-height: 140px; flex: none; height: 180px; }
 .retro-text { min-height: 240px; flex: none; height: 320px; }
-.scratch-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
-.scratch-what { color: var(--text-3); font-size: 12px; }
 .scratch-to { display: flex; align-items: center; gap: 6px; color: var(--text-2); }
 .scratch-to select { background: #262626; color: var(--text); border: 1px solid #3a3a3a; border-radius: 5px; padding: 3px 6px; font: inherit; max-width: 280px; }
 .scratch-to select:focus-visible { outline: 2px solid #ffffff; outline-offset: 1px; }
