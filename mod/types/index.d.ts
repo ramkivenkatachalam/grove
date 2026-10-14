@@ -21,6 +21,6 @@ export type Feature = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'feature-hub': { features: Feature[]; self: string | null; isHidden: boolean }
+    grove: { features: Feature[]; self: string | null; isHidden: boolean }
   }
 }

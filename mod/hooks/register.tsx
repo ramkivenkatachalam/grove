@@ -3,9 +3,9 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Feature, FeatureState, Pr } from '../types'
 
-const features = atom({ plugin: 'feature-hub', key: 'features' } as const, [])
-const self = atom({ plugin: 'feature-hub', key: 'self' } as const, null)
-const isHidden = atom({ plugin: 'feature-hub', key: 'isHidden' } as const, false)
+const features = atom({ plugin: 'grove', key: 'features' } as const, [])
+const self = atom({ plugin: 'grove', key: 'self' } as const, null)
+const isHidden = atom({ plugin: 'grove', key: 'isHidden' } as const, false)
 
 const POLL_MS = 3000
 const PR_TTL_MS = 180_000
@@ -43,7 +43,7 @@ type Git = { dirty: number; ahead: number; behind: number; stage: number | null;
 
 // the feature's lifecycle, as statusline-feature.sh tracked it; colours are xterm-256 fills
 const STAGES = ['Explore', 'Design', 'Spec', 'Build', 'Verify', 'PR', 'Review', 'Merged']
-// design A (Feature Hub canvas): words for each state; colours come from the palette
+// design A (the Grove canvas): words for each state; colours come from the palette
 const STATE_WORD: Record<FeatureState, string> = {
   waiting: 'NEEDS YOU',
   ready: 'YOUR TURN',
@@ -70,7 +70,7 @@ const parse = <T,>(text: string): T | undefined => {
 }
 
 let hub = ''
-let fh = ''
+let cli = ''
 let me: Registered | undefined
 let myState: FeatureState = 'offline'
 let lastSeen = new Map<string, FeatureState>()
@@ -134,7 +134,7 @@ async function syncPrs($: EngineInterface, cache: PrCache) {
     return
   }
   isSyncing = true
-  await run($, [fh, 'pr'])
+  await run($, [cli, 'pr'])
   isSyncing = false
 }
 
@@ -289,7 +289,7 @@ function nextStep(pr: Pr | null): string {
     }
   }
   if (pr?.state === 'MERGED') {
-    return 'merged — fh clean --yes'
+    return 'merged — grove clean --yes'
   }
 
   return summary.next || (myState === 'ready' ? 'give Claude its next instruction' : 'let it work')
@@ -312,7 +312,7 @@ function stateNote(now: number): string {
   return myState === 'ready' ? 'finished its turn' : ''
 }
 
-// the header's facts as data, for the Feature Hub app (it reads status/<name>.json)
+// the header's facts as data, for the Grove app (it reads status/<name>.json)
 async function publishDetails($: EngineInterface) {
   if (me === undefined) {
     return
@@ -385,7 +385,7 @@ async function paintHeader($: EngineInterface) {
     : `${on(TEXT_2)} no recap yet — it appears after Claude's first turn`
   const row2 = `${recap}#[align=right]${facts.join(sep)} `
 
-  // row 3: the stage track (current stage underlined, in words); panel buttons come from fh
+  // row 3: the stage track (current stage underlined, in words); panel buttons come from grove
   const track = STAGES.map((name, index) => {
     if (index === stage.index) {
       const label = index === 7 ? '✓ Merged' : `${name} ${index + 1}/8`
@@ -399,10 +399,10 @@ async function paintHeader($: EngineInterface) {
   if (header !== lastHeader) {
     lastHeader = header
     await run($, ['tmux',
-      'set-option', '-w', '-t', pane, '@fh_h1', row1, ';',
-      'set-option', '-w', '-t', pane, '@fh_h2', row2, ';',
-      'set-option', '-w', '-t', pane, '@fh_h3', row3, ';',
-      'set-option', '-w', '-t', pane, '@fh_fill', fill])
+      'set-option', '-w', '-t', pane, '@grove_h1', row1, ';',
+      'set-option', '-w', '-t', pane, '@grove_h2', row2, ';',
+      'set-option', '-w', '-t', pane, '@grove_h3', row3, ';',
+      'set-option', '-w', '-t', pane, '@grove_fill', fill])
   }
 }
 
@@ -456,15 +456,15 @@ async function setState($: EngineInterface, state: FeatureState, message = '') {
   if (pane !== undefined) {
     // a window flag the tmux status bar shows (see tmux.conf)
     const flag = NEEDS_YOU.includes(state) ? ICON[state] : ''
-    await run($, ['tmux', 'set-option', '-w', '-t', pane, '@fh_attn', flag])
+    await run($, ['tmux', 'set-option', '-w', '-t', pane, '@grove_attn', flag])
   }
   if (state === 'working') {
     // keep the Mac awake while any agent works; the watcher lets go once none do
-    await run($, [fh, 'keepawake'])
+    await run($, [cli, 'keepawake'])
   }
   if (state === 'ready') {
-    // a turn ended: refresh the feature's recap (detached; fh spaces these out and skips if nothing changed)
-    await run($, [fh, 'recap', me.name, '--bg'])
+    // a turn ended: refresh the feature's recap (detached; grove spaces these out and skips if nothing changed)
+    await run($, [cli, 'recap', me.name, '--bg'])
   }
   if (state === 'waiting') {
     // a desktop notification, unless you are looking at this window
@@ -505,7 +505,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('HOME')) ?? ''
     hub = `${home}/.grove`
-    fh = `${hub}/bin/fh`
+    cli = `${hub}/bin/grove`
     const registry = await readRegistry($)
     const sid = await $.session.id()
     me = registry.find(one => one.kind === 'session'
@@ -516,7 +516,7 @@ export const register: Register = on => {
       const previous = await $.fs.read(`${me.dir}/status.json`).then(parse<Status>, () => undefined)
       summary = { work: previous?.work ?? '', now: previous?.now ?? '', next: previous?.next ?? '' }
       if (pane !== undefined) {
-        await run($, ['tmux', 'set-option', '-w', '-t', pane, '@fh_feature', me.name])
+        await run($, ['tmux', 'set-option', '-w', '-t', pane, '@grove_feature', me.name])
       }
     }
     await update($, self, () => me?.name ?? null)
@@ -533,7 +533,7 @@ export const register: Register = on => {
         required: ['name', 'task', 'context'],
         properties: {
           name: { type: 'string', description: 'Short lowercase kebab-case name (e.g. csv-export), or a Linear ticket id like NUM-1234' },
-          title: { type: 'string', description: 'Human title shown in the Feature Hub sidebar (e.g. "CSV export for variance report")' },
+          title: { type: 'string', description: 'Human title shown in the Grove sidebar (e.g. "CSV export for variance report")' },
           task: { type: 'string', description: 'What the new session should do, in one or two sentences' },
           context: { type: 'string', description: 'The handover brief: findings, files, decisions, constraints, out of scope' },
           base: { type: 'string', enum: ['main', 'current'], description: 'Branch from origin/main (default), or stack on this feature’s branch when the work depends on unmerged changes here' },
@@ -543,7 +543,7 @@ export const register: Register = on => {
 
     await $.command.register({
       name: 'feature',
-      description: 'Feature hub: /feature [name] | new <name|TICKET> [-p prompt] | address | up|down|restart [name] | clean | doctor | done <name>',
+      description: 'Grove: /feature [name] | new <name|TICKET> [-p prompt] | address | up|down|restart [name] | clean | doctor | done <name>',
     })
     await refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
@@ -570,10 +570,10 @@ export const register: Register = on => {
         `Use exactly these ports for curl and browser checks — never the project's defaults or another feature's ports.`,
       ] : []),
       ...(me.agentNotes ? [me.agentNotes] : []),
-      `Manage services with \`${fh} restart|up|down ${me.name}\`; \`${fh} doctor\` diagnoses setup, ports and env.`,
+      `Manage services with \`${cli} restart|up|down ${me.name}\`; \`${cli} doctor\` diagnoses setup, ports and env.`,
     ].join('\n')
 
-    return { sections: [...composed.sections, { id: 'feature-hub:context', text, scope: 'session' }] }
+    return { sections: [...composed.sections, { id: 'grove:context', text, scope: 'session' }] }
   })
 
   on('turn.start', async ($, e, next) => {
@@ -592,7 +592,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('tool.call', { tool: /^mcp__feature-hub__new_feature$/ }, async ($, e) => {
+  on('tool.call', { tool: /^mcp__grove__new_feature$/ }, async ($, e) => {
     const input = e as unknown as Record<string, unknown>
     const text = (key: string) => (typeof input[key] === 'string' ? (input[key] as string).trim() : '')
     const name = text('name')
@@ -606,7 +606,7 @@ export const register: Register = on => {
       `## Context handed over from feature ${from}`,
       text('context') || '(none given)',
     ].join('\n')
-    const argv = [fh, 'new', name]
+    const argv = [cli, 'new', name]
     if (text('title')) {
       argv.push('--title', text('title'))
     }
@@ -619,11 +619,11 @@ export const register: Register = on => {
     argv.push('-p', prompt)
     const made = await run($, argv)
     if (made.exitCode !== 0) {
-      return { deny: (made.stderr || made.stdout).trim() || `fh new exited ${made.exitCode}` }
+      return { deny: (made.stderr || made.stdout).trim() || `grove new exited ${made.exitCode}` }
     }
     await refresh($)
 
-    return { result: `${made.stdout.trim()}\nThe new feature's Claude session has started with the task and your handover. It shows in the Feature Hub sidebar.` }
+    return { result: `${made.stdout.trim()}\nThe new feature's Claude session has started with the task and your handover. It shows in the Grove sidebar.` }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -669,7 +669,7 @@ export const register: Register = on => {
       if (name === undefined) {
         return { text: 'Not in a feature worktree: /feature address <name>' }
       }
-      const brief = await run($, [fh, 'findings', name, '--brief', '--mark'])
+      const brief = await run($, [cli, 'findings', name, '--brief', '--mark'])
       if (brief.exitCode !== 0 || !brief.stdout.includes('For each one:')) {
         return { text: (brief.stdout + brief.stderr).trim() || 'No findings.' }
       }
@@ -682,17 +682,17 @@ export const register: Register = on => {
     // a prompt with spaces: /feature new NUM-123 -p fix the totals row
     const promptAt = rest.indexOf('-p')
     const argv = verb === ''
-      ? [fh, 'ls']
+      ? [cli, 'ls']
       : verb === 'new' && promptAt >= 0
-        ? [fh, 'new', ...rest.slice(0, promptAt), '-p', rest.slice(promptAt + 1).join(' ')]
+        ? [cli, 'new', ...rest.slice(0, promptAt), '-p', rest.slice(promptAt + 1).join(' ')]
         : VERBS.includes(verb)
-          ? [fh, verb, ...(rest.length === 0 && ['restart', 'up', 'down', 'findings'].includes(verb) ? here : rest)]
-          : [fh, 'go', verb]
+          ? [cli, verb, ...(rest.length === 0 && ['restart', 'up', 'down', 'findings'].includes(verb) ? here : rest)]
+          : [cli, 'go', verb]
     const result = await run($, argv)
     await refresh($)
     const text = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join('\n')
 
-    return { text: text || (result.exitCode === 0 ? 'ok' : `fh exited ${result.exitCode}`) }
+    return { text: text || (result.exitCode === 0 ? 'ok' : `grove exited ${result.exitCode}`) }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -723,7 +723,7 @@ export const register: Register = on => {
             plain
             hotkey={String(index + 1)}
             label={`${ICON[row.state]} ${row.name}${row.name === mine ? '*' : ''}${prLabel(row.pr)}  `}
-            onPress={() => void run($, [fh, 'go', row.name])}
+            onPress={() => void run($, [cli, 'go', row.name])}
           />
         ))}
         <Button key="hide" plain label="hide" onPress={() => update($, isHidden, () => true)} />

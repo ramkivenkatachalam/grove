@@ -20,7 +20,7 @@ side and tells you which one needs you.
   brief, Grove creates the feature and switches to it.
 - **Dock badge** with the number of features waiting on you, plus desktop notifications.
 
-Quitting Grove stops nothing: every terminal is a tmux session (`fh_<feature>_<pane>`) that keeps running.
+Quitting Grove stops nothing: every terminal is a tmux session (`grove_<feature>_<pane>`) that keeps running.
 
 ## How it fits together
 
@@ -30,7 +30,7 @@ Quitting Grove stops nothing: every terminal is a tmux session (`fh_<feature>_<p
  └───────┬──────────────────────────┬────────────┘
    reads state files          attaches terminals
          │                          │
- ~/.grove/                     tmux sessions  fh_<feature>_<pane>
+ ~/.grove/                     tmux sessions  grove_<feature>_<pane>
    projects/<p>/<feature>/      (claude · shell · services …)
      feature.json status.json       ▲            ▲
          ▲      ▲                   │            │
@@ -48,10 +48,10 @@ hosts every process, so the app can come and go.
 | Piece | Where | Role |
 |---|---|---|
 | App | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | Electron + React + xterm.js. Reads state from `~/.grove`, attaches terminals to tmux sessions through a tiny Python pty bridge (no native modules) |
-| `grove` CLI (`fh`) | `cli/fh` | Python, stdlib only. Projects, worktrees, per-service port allocation, env rewriting, dev servers, PR/CI sync, review-bot findings, ticket briefs, cleanup, `grove doctor` |
+| `grove` CLI | `cli/grove` | Python, stdlib only. Projects, worktrees, per-service port allocation, env rewriting, dev servers, PR/CI sync, review-bot findings, ticket briefs, cleanup, `grove doctor` |
 | Claude Code mod | `mod/` | Function hooks loaded by every Claude Code session: publishes each session's state, recap and next step, notifications, the `new_feature` tool, `/feature` commands |
-| tmux | `fh_<feature>_<pane>` sessions | Hosts every Claude, service and shell process; the app attaches to them and nothing stops when it quits |
-| tmux config | `tmux/grove.tmux.conf` | The terminal-only front end (header in tmux's status line), used with `fh ui tmux` |
+| tmux | `grove_<feature>_<pane>` sessions | Hosts every Claude, service and shell process; the app attaches to them and nothing stops when it quits |
+| tmux config | `tmux/grove.tmux.conf` | The terminal-only front end (header in tmux's status line), used with `grove ui tmux` |
 
 State lives in `~/.grove/`, one folder per project and per feature:
 
@@ -137,7 +137,7 @@ Then add the settings lines `install.sh` prints, so every Claude session loads t
 | Run from source | `npm start` |
 | Rebuild and reinstall the app | `npm run install-app` (quit Grove first) |
 | Regenerate the icon from `build/icon.svg` | `npm run icon` |
-| Screenshot the app (visual checks) | `FH_SCREENSHOT=/tmp/grove.png npx electron .` |
+| Screenshot the app (visual checks) | `GROVE_SCREENSHOT=/tmp/grove.png npx electron .` |
 | Validate / test the mod | `claude plugin validate mod && claude plugin test mod` |
 
 ## Keys

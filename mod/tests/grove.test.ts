@@ -47,7 +47,7 @@ function host(on: On, env: Record<string, string> = {}) {
   })
   const clock = mock.clock(on, { now: 1000 })
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__feature-hub__${e.name}` } }))
+  on('tool.register', ($, e) => ({ value: { tool: `mcp__grove__${e.name}` } }))
   on('ui.toast', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -76,7 +76,7 @@ test('a session in a feature worktree publishes its state', async ($, on) => {
   expect(fake.commands.some(argv => argv[0] === 'osascript')).toBe(true)
 })
 
-test('/feature routes to fh', async ($, on) => {
+test('/feature routes to grove', async ($, on) => {
   const fake = host(on)
 
   await $.session.start({ cwd: '/elsewhere', surface: null, isInteractive: true })
@@ -87,10 +87,10 @@ test('/feature routes to fh', async ($, on) => {
   await $.command.run({ command: 'feature', args: 'new metering-v2 origin/main', origin, presentation } as never)
   await $.command.run({ command: 'feature', args: '', origin, presentation } as never)
 
-  const fh = `${HUB}/bin/fh`
-  expect(fake.commands).toContainEqual([fh, 'go', 'flux'])
-  expect(fake.commands).toContainEqual([fh, 'new', 'metering-v2', 'origin/main'])
-  expect(fake.commands).toContainEqual([fh, 'ls'])
+  const cli = `${HUB}/bin/grove`
+  expect(fake.commands).toContainEqual([cli, 'go', 'flux'])
+  expect(fake.commands).toContainEqual([cli, 'new', 'metering-v2', 'origin/main'])
+  expect(fake.commands).toContainEqual([cli, 'ls'])
   // not inside a feature worktree: nothing published
   expect(fake.files.has(`${HUB}/projects/acme/flux/status.json`)).toBe(false)
 })
@@ -101,7 +101,7 @@ test('a feature session learns its ports and can hand off review findings', asyn
 
   await $.session.start({ cwd: WT, surface: null, isInteractive: true })
   const composed = await $.prompt.compose({ model: 'm', promptModel: 'm', surfaces: [], tools: [], outputStyle: null, traits: [] })
-  const mine = composed.sections.find(section => section.id === 'feature-hub:context')
+  const mine = composed.sections.find(section => section.id === 'grove:context')
   expect(mine?.text).toContain('http://localhost:3001')
   expect(mine?.text).toContain('http://localhost:5006')
   expect(mine?.text).toContain('Sign-in works on the fe port.')
@@ -109,7 +109,7 @@ test('a feature session learns its ports and can hand off review findings', asyn
   const origin = { kind: 'composer' as const }
   const presentation = { isFullscreen: false, columns: 120 }
   await $.command.run({ command: 'feature', args: 'address', origin, presentation } as never)
-  expect(fake.commands).toContainEqual([`${HUB}/bin/fh`, 'findings', 'flux', '--brief', '--mark'])
+  expect(fake.commands).toContainEqual([`${HUB}/bin/grove`, 'findings', 'flux', '--brief', '--mark'])
   await fake.clock.advance(200)
   expect(fake.submitted[0]).toContain('For each one:')
 })
@@ -131,16 +131,16 @@ test('inside tmux the window header says what, next step and facts', async ($, o
   await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1' } as never)
   await fake.clock.advance(100)
 
-  const paints = fake.commands.filter(argv => argv.includes('@fh_h1'))
+  const paints = fake.commands.filter(argv => argv.includes('@grove_h1'))
   const last = paints.at(-1) ?? []
-  const line1 = last[last.indexOf('@fh_h1') + 1] ?? ''
-  const line2 = last[last.indexOf('@fh_h2') + 1] ?? ''
-  const line3 = last[last.indexOf('@fh_h3') + 1] ?? ''
+  const line1 = last[last.indexOf('@grove_h1') + 1] ?? ''
+  const line2 = last[last.indexOf('@grove_h2') + 1] ?? ''
+  const line3 = last[last.indexOf('@grove_h3') + 1] ?? ''
   // identity, a state that carries a word, and the next step
   expect(line1).toContain('flux')
   // the stage track names the current stage and its position
   expect(line3).toMatch(/[A-Z][a-z]+ \d\/8/)
-  expect(last).toContain('@fh_fill')
+  expect(last).toContain('@grove_fill')
   expect(line1).toContain('YOUR TURN')
   expect(line1).toContain('NEXT ▸')
   expect(line1).toContain('run the jest suite')
@@ -156,7 +156,7 @@ test('Claude can spin off a related feature with a handover', async ($, on) => {
 
   await $.session.start({ cwd: WT, surface: null, isInteractive: true })
   const made = await $.tool.call({
-    tool: 'mcp__feature-hub__new_feature',
+    tool: 'mcp__grove__new_feature',
     name: 'csv-export',
     title: 'CSV export for variance',
     task: 'Add a CSV export to the variance report.',
@@ -188,16 +188,16 @@ test('a main-checkout session is matched by its id, not its folder', async ($, o
   expect(fake.files.has(`${HUB}/projects/acme/s-other/status.json`)).toBe(false) // same folder, another conversation
 })
 
-test('a working session asks fh to keep the Mac awake', async ($, on) => {
+test('a working session asks grove to keep the Mac awake', async ($, on) => {
   const fake = host(on)
   on('turn.start', ($, e) => e)
 
   await $.session.start({ cwd: WT, surface: null, isInteractive: true })
-  expect(fake.commands).not.toContainEqual([`${HUB}/bin/fh`, 'keepawake'])
+  expect(fake.commands).not.toContainEqual([`${HUB}/bin/grove`, 'keepawake'])
 
   await $.turn.start({ turnId: 't1' } as never)
   expect(fake.status().state).toBe('working')
-  expect(fake.commands).toContainEqual([`${HUB}/bin/fh`, 'keepawake'])
+  expect(fake.commands).toContainEqual([`${HUB}/bin/grove`, 'keepawake'])
 })
 
 test('each feature reports into its own folder, whatever project it is in', async ($, on) => {
@@ -213,7 +213,7 @@ test('each feature reports into its own folder, whatever project it is in', asyn
   expect(fake.files.has(`${HUB}/projects/acme/flux/status.json`)).toBe(false)
 })
 
-test('a finished turn asks fh to refresh the recap', async ($, on) => {
+test('a finished turn asks grove to refresh the recap', async ($, on) => {
   const fake = host(on)
   on('turn.start', ($, e) => e)
   on('turn.complete', () => ({ text: '' }))
@@ -224,7 +224,7 @@ test('a finished turn asks fh to refresh the recap', async ($, on) => {
   await $.turn.complete({ turnId: 't1', answer: 'Added the button.', durationMs: 5, isAborted: false } as never)
 
   expect(fake.status().state).toBe('ready')
-  expect(fake.commands).toContainEqual([`${HUB}/bin/fh`, 'recap', 'flux', '--bg'])
+  expect(fake.commands).toContainEqual([`${HUB}/bin/grove`, 'recap', 'flux', '--bg'])
 })
 
 test('tmux commands that would reach the live server are blocked', async ($, on) => {
@@ -246,7 +246,7 @@ test('tmux commands that would reach the live server are blocked', async ($, on)
 
   await bash('env -u TMUX TMUX_TMPDIR=/tmp/x/tm tmux new-session -d -s t && unset TMUX && TMUX_TMPDIR=/tmp/x/tm tmux kill-server')
   await bash('tmux -S /tmp/x/sock new-session -d -s t; tmux -S /tmp/x/sock kill-server')
-  await bash('tmux ls; tmux capture-pane -p -S -20 -t fh_flux_claude')
+  await bash('tmux ls; tmux capture-pane -p -S -20 -t grove_flux_claude')
   await bash('git status')
   expect(ran).toBe(4)
 })

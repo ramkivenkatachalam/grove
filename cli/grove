@@ -1,1 +1,1941 @@
-fh
+#!/usr/bin/env python3
+"""grove — Grove's command line: one git worktree, branch, set of ports, dev servers and Claude session
+per feature, for any project described by a project config (see `grove project`).
+
+  grove new <name|TICKET-123> [--project P] [--title T] [--parent NAME] [--base REF] [-p PROMPT]
+                         worktree on <you>/<name>, its own ports, env rewritten, deps prepared,
+                         servers up, Claude briefed (ticket / prompt). A name typed as words
+                         becomes a slug ("Main panel tabs" → main-panel-tabs) and the words its title
+  grove adopt <worktree>…   register existing worktrees as features (services start stopped)
+  grove sessions [--hours H]          recent Claude conversations in the main checkout, not yet in Grove
+  grove adopt --session <id>…         bring those conversations into Grove (they resume there)
+  grove ls                  features, ports, servers, labels, PR/CI, session state
+  grove go <name>           (tmux UI) switch to the feature's window
+  grove up|down|restart <name>   start / stop / restart the feature's services
+  grove rename <name> <title…>   the display title (worktree, branch and ports keep the name)
+  grove pr [--force]        refresh the PR/CI cache (gh), at most every 3 minutes unless forced
+  grove findings <name> [--brief] [--mark]   unanswered claude[bot]/Copilot review comments
+  grove clean [--yes]       list (or remove) features whose PR merged and whose tree is clean
+  grove done <name>         close it: remove servers, sessions, worktree, branch, state (notes and retro archived);
+                         asks for --force if it has uncommitted or unmerged work; --keep keeps worktree and branch
+  grove migrate             move an older hub to one folder per project and feature (safe to re-run)
+  grove doctor              check projects and features: files, deps, ports, env, labels
+  grove keepawake [--status|off|on]   keep the Mac awake while any agent is working (Claude
+                         sessions start it; it lets go once none are)
+  grove retro <name>        draft the feature's retro (what went well, what didn't, what to try next time
+                         with an agent) into its retro.md; once, as the feature wraps up
+  grove send <name> <text…>  type text into the feature's Claude session (starts it if needed)
+  grove recap <name> [--force] [--bg]   a scannable recap of the feature's work (goal, done, now, next,
+                         decisions, blockers), written to its recap.json; sessions refresh it after
+                         each turn, at most every few minutes; --bg returns at once
+
+  grove project ls                       projects and which one is the default
+  grove project add <repo> [--name N]    register a repo (reads its .grove.json, or writes a starter)
+  grove project default <name>           the project `grove new` uses outside any project directory
+  grove project show <name>              the merged config
+
+  grove host <name>         (app) every pane in its own tmux session; prints JSON
+  grove ui [app|tmux]       which front end new features open in
+  grove theme [palette]     header palette (claude, plum, teal, wine, forest, slate)
+  grove toggle <name> <panel> · grove relayout <name> · grove attach      (tmux UI)
+
+Everything lives under ~/.grove, one folder per project and per feature:
+
+  ~/.grove/projects/<project>/project.json            your config for that project
+  ~/.grove/projects/<project>/<feature>/feature.json  the registry entry
+                                       /status.json   written by the Claude Code mod
+                                       /brief.md      the task, until the agent picks it up
+                                       /recap.json    goal, done, now, next… (grove recap)
+                                       /notes.md      the Summary tab's scratchpad
+                                       /retro.md      grove retro, then yours to edit
+                                       /worktree/     the git worktree (a link for features made elsewhere)
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+HUB = Path(os.environ.get("GROVE_HUB", HOME / ".grove"))
+PROJECTS = HUB / "projects"
+PRS, FEEDBACK, CONFIG, THEME = HUB / "prs.json", HUB / "feedback.json", HUB / "config.json", HUB / "theme.json"
+AWAKE = HUB / "keepawake.pid"
+AWAKE_POLL = 30
+RECAP_GAP = 180  # seconds between automatic recaps of one feature
+RECAP_MODEL = "haiku"
+RETRO_MODEL = "sonnet"  # once per feature, so worth the better model
+BIN = os.environ.get("GROVE_BIN", str(HUB / "bin/grove"))
+SESSION = "features"
+PARK = "grove-park"  # tmux UI: a detached session where closed panels keep running
+PR_TTL = 180
+BOTS = ("claude[bot]", "copilot")
+TICKET = re.compile(r"^[A-Za-z][A-Za-z0-9]*-\d+$")
+
+PROJECTS.mkdir(parents=True, exist_ok=True)
+
+
+def die(msg: str) -> None:
+    print(f"grove: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def run(argv, cwd=None, check=False) -> subprocess.CompletedProcess:
+    r = subprocess.run(argv, cwd=cwd, text=True, capture_output=True)
+    if check and r.returncode:
+        die(f"{' '.join(str(a) for a in argv[:3])}…: {r.stderr.strip() or r.stdout.strip()}")
+    return r
+
+
+def read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path: Path, value) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def expand(path: str) -> Path:
+    return Path(os.path.expanduser(path)).resolve()
+
+
+# ---------- projects ----------
+#
+# A project config says how to grow a feature from a repo. It is the repo's own `.grove.json`
+# (shareable, committed by the team) merged under ~/.grove/projects/<name>/project.json
+# (yours: at least {"repo": …}; anything here overrides the repo's file).
+#
+#   repo          the main checkout                        worktrees  where worktrees go (default: in each
+#                                                                     feature's folder under ~/.grove)
+#   base          start point for new branches (origin/main)   branchPrefix  "{user}/" by default
+#   setup         {"link": [...], "clone": [...], "copy": [...], "run": [...]}, paths relative to the repo:
+#                 link = symlink to the main checkout's copy; clone = APFS copy-on-write clone;
+#                 copy = copy if missing (env files); run = shell commands in the new worktree
+#   services      [{"name", "dir", "run", "ports": [lo, hi], "reserved": [...], "key", "hint", "open"}]
+#                 run / hint / open may use {port}, {<service>}, {name}, {path}
+#   env           [{"file", "port": {"KEY": "<service>"}, "set": {"KEY": "value with {fe}"}}]:
+#                 port = rewrite localhost:NNNN in that line; set = the whole value (added if missing)
+#   labels        [{"name", "file", "key", "rules": [[regex, label], ...], "warn": [labels]}]
+#   checks        what the agent should run before finishing      agentNotes  extra lines for the agent
+#   panels        extra panels: [{"name", "key", "run", "dir"}]
+
+DEFAULT_PROJECT = {
+    "base": "origin/main",
+    "branchPrefix": "{user}/",
+    "setup": {"link": [], "clone": [], "copy": [], "run": []},
+    "services": [],
+    "env": [],
+    "labels": [],
+    "checks": "Run the tests and linters that cover what you touched.",
+    "agentNotes": "",
+    "panels": [],
+}
+
+
+def project_conf(name: str) -> Path:
+    return PROJECTS / name / "project.json"
+
+
+def project_names() -> list[str]:
+    return sorted(p.parent.name for p in PROJECTS.glob("*/project.json"))
+
+
+def project(name: str) -> dict:
+    mine = read_json(project_conf(name), None)
+    if mine is None:
+        die(f"no project '{name}' (grove project ls)")
+    repo = expand(mine.get("repo", ""))
+    shared = read_json(repo / ".grove.json", {})
+    p = {**DEFAULT_PROJECT, **shared, **mine}
+    p["setup"] = {**DEFAULT_PROJECT["setup"], **shared.get("setup", {}), **mine.get("setup", {})}
+    p["name"], p["repo"] = name, repo
+    p["worktrees"] = expand(p["worktrees"]) if p.get("worktrees") else None
+    return p
+
+
+def worktree_for(p: dict, name: str) -> Path:
+    """Where a new feature's worktree goes: its own folder in the hub, unless the project says otherwise."""
+    return p["worktrees"] / name if p["worktrees"] else PROJECTS / p["name"] / name / "worktree"
+
+
+def default_project() -> str:
+    names = project_names()
+    chosen = read_json(CONFIG, {}).get("defaultProject")
+    if chosen in names:
+        return chosen
+    if len(names) == 1:
+        return names[0]
+    die("no project chosen: grove project add <repo>, or grove new … --project <name>"
+        + (f" (projects: {', '.join(names)})" if names else ""))
+
+
+def project_here() -> str | None:
+    cwd = os.getcwd()
+    for f in features():
+        if cwd == f["path"] or cwd.startswith(f["path"] + "/"):
+            return f.get("project")
+    for name in project_names():
+        repo = str(project(name)["repo"])
+        if cwd == repo or cwd.startswith(repo + "/"):
+            return name
+    return None
+
+
+def services(p: dict) -> list[dict]:
+    return [s for s in p.get("services", []) if s.get("name")]
+
+
+def handle(p: dict) -> str:
+    who = os.environ.get("GROVE_USER") or os.environ.get("FH_USER")  # FH_USER: the name before Grove
+    if who:
+        return who
+    email = run(["git", "-C", str(p["repo"]), "config", "user.email"]).stdout.strip()
+    return re.sub(r"[^a-zA-Z0-9._-]+", "-", email.split("@")[0]) or os.environ.get("USER", "me")
+
+
+def fill(text: str, f: dict, port: int | None = None) -> str:
+    """{port}, {<service>}, {name}, {path}, {grove} in config strings; anything else is left as written."""
+    values = {"name": f["name"], "path": f["path"], "grove": BIN, "fh": BIN, **{k: str(v) for k, v in ports(f).items()}}
+    if port is not None:
+        values["port"] = str(port)
+    return re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), text)
+
+
+# ---------- registry ----------
+
+def features() -> list[dict]:
+    rows = [read_json(p, None) for p in sorted(PROJECTS.glob("*/*/feature.json"))]
+    return [r for r in rows if r]
+
+
+def registered(name: str) -> Path | None:
+    """The feature.json of `name`, in whichever project it is (names are unique across projects)."""
+    return next(PROJECTS.glob(f"*/{name}/feature.json"), None)
+
+
+def feature(name: str) -> dict:
+    path = registered(name)
+    f = read_json(path, None) if path else None
+    if not f:
+        die(f"no feature '{name}' (grove ls)")
+    return f
+
+
+def feature_dir(f: dict) -> Path:
+    return PROJECTS / (f.get("project") or default_project()) / f["name"]
+
+
+def save(f: dict) -> None:
+    write_json(feature_dir(f) / "feature.json", f)
+
+
+def status_of(f: dict) -> dict:
+    return read_json(feature_dir(f) / "status.json", {})
+
+
+def ports(f: dict) -> dict[str, int]:
+    if "ports" in f:
+        return f["ports"]
+    return {k: f[v] for k, v in (("fe", "fePort"), ("be", "bePort")) if v in f}  # before projects
+
+
+def project_of(f: dict) -> dict:
+    return project(f.get("project") or default_project())
+
+
+# ---------- ports & processes ----------
+
+def listening() -> set[int]:
+    out = run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fn"]).stdout
+    return {int(m) for m in re.findall(r"^n.*:(\d+)$", out, re.M)}
+
+
+def alloc(service: dict, taken: set[int]) -> int:
+    lo, hi = (service.get("ports") or [4000, 4999])[:2]
+    for port in range(lo, hi + 1):
+        if port not in taken and port not in set(service.get("reserved", [])):
+            return port
+    die(f"no free port for {service['name']} in {lo}-{hi}; `grove done` a feature first")
+
+
+def stop_port(port: int) -> None:
+    pids = run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"]).stdout.split()
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    # a --reload supervisor respawns its worker: wait, then force
+    for _ in range(12):
+        if not run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"]).stdout.strip():
+            return
+        time.sleep(0.5)
+    for pid in run(["lsof", "-ti", f"tcp:{port}"]).stdout.split():
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+# ---------- worktree provisioning ----------
+
+def set_env_key(lines: list[str], key: str, fn) -> bool:
+    hit = False
+    for i, line in enumerate(lines):
+        if line.startswith(f"{key}="):
+            lines[i] = fn(line)
+            hit = True
+    return hit
+
+
+def provision(p: dict, f: dict) -> None:
+    repo, wt = p["repo"], Path(f["path"])
+    setup = p["setup"]
+    for rel in setup.get("link", []):
+        if not (wt / rel).exists() and (repo / rel).exists():
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (wt / rel).symlink_to(repo / rel)
+    for rel in setup.get("clone", []):
+        if not (wt / rel).exists() and (repo / rel).is_dir():
+            print(f"cloning {rel} (copy-on-write)…")
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            run(["cp", "-Rc", str(repo / rel), str(wt / rel)], check=True)
+    for rel in setup.get("copy", []):
+        if not (wt / rel).exists() and (repo / rel).exists():
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (wt / rel).write_bytes((repo / rel).read_bytes())
+    for rule in p.get("env", []):
+        path = wt / rule["file"]
+        if not path.exists():
+            continue
+        lines = path.read_text().splitlines()
+        for key, svc in rule.get("port", {}).items():
+            port = ports(f).get(svc)
+            if port:
+                set_env_key(lines, key, lambda l, port=port: re.sub(r"localhost:\d+", f"localhost:{port}", l))
+        for key, value in rule.get("set", {}).items():
+            value = fill(value, f)
+            if not set_env_key(lines, key, lambda l, value=value, key=key: f"{key}={value}"):
+                lines.append(f"{key}={value}")
+        path.write_text("\n".join(lines) + "\n")
+    for cmd in setup.get("run", []):
+        print(f"setup: {cmd}")
+        r = subprocess.run(["bash", "-lc", fill(cmd, f)], cwd=wt)
+        if r.returncode:
+            print(f"grove: setup step failed ({r.returncode}): {cmd}", file=sys.stderr)
+
+
+def labels(p: dict, f: dict) -> list[tuple[str, str]]:
+    """[(name, label)] from the project's label rules: the last uncommented KEY=… line wins."""
+    out = []
+    for rule in p.get("labels", []):
+        try:
+            text = (Path(f["path"]) / rule["file"]).read_text()
+        except OSError:
+            out.append((rule["name"], "?"))
+            continue
+        values = re.findall(rf"^\s*{re.escape(rule['key'])}\s*=\s*(.*)$", text, re.M)
+        if not values:
+            out.append((rule["name"], "none"))
+            continue
+        value = values[-1]
+        label = next((lab for rx, lab in rule.get("rules", []) if re.search(rx, value)), None)
+        out.append((rule["name"], label or value.split("@")[-1].split("/")[0][:16]))
+    return out
+
+
+# ---------- panes: claude, shell, every service, extra panels ----------
+
+def layout(f: dict) -> list[dict]:
+    panes = [{"name": "claude", "run": "{grove} agent {name}", "dir": ""},
+             {"name": "shell", "key": "s", "run": "", "dir": "", "focus": True}]
+    if f.get("kind") == "session":
+        return panes
+    p = project_of(f)
+    for s in services(p):
+        panes.append({"name": s["name"], "key": s.get("key", ""), "run": "{grove} serve " + s["name"] + " {name}",
+                      "dir": s.get("dir", ""), "service": True})
+    panes += [x for x in p.get("panels", []) if x.get("name")]
+    used = set()
+    for pane in panes[1:]:  # a unique key per panel: given, else its first free letter
+        key = pane.get("key") or next((c for c in pane["name"].lower() if c.isalpha() and c not in used), "")
+        pane["key"] = key if key not in used else ""
+        used.add(pane["key"])
+    return panes
+
+
+def panels(f: dict) -> list[dict]:
+    return [x for x in layout(f) if x["name"] != "claude"]
+
+
+def pane_cmd(cmd: str) -> str:
+    return f"{cmd}; exec $SHELL"
+
+
+def pane_run(pane: dict, f: dict, servers: bool) -> str:
+    if pane.get("service") and not servers:
+        return pane_cmd(f"echo '{pane['name']} stopped — grove up {f['name']}'")
+    cmd = fill(pane.get("run") or "", f)
+    return pane_cmd(cmd) if cmd else ""
+
+
+def hint(f: dict, pane: str) -> str:
+    if pane == "shell":
+        return f"worktree {f['path'].replace(str(HOME), '~')}"
+    service = next((s for s in services(project_of(f)) if s["name"] == pane), None)
+    port = ports(f).get(pane)
+    if service and service.get("hint"):
+        return fill(service["hint"], f, port)
+    return f":{port}" if port else ""
+
+
+# ---------- tmux ----------
+
+def tmux(*args) -> subprocess.CompletedProcess:
+    return run(["tmux", *args])
+
+
+def ui_mode() -> str:
+    """'app' when the Grove app is the front end, else 'tmux' (windows in session `features`)."""
+    return read_json(CONFIG, {}).get("ui", "tmux")
+
+
+DEFAULT_THEME = {
+    "_help": "grove theme <name> switches the palette. Text on band is #eeeeee (main) and #bcbcbc "
+             "(secondary); pills use black text. Keep every pair >= 4.5:1.",
+    "palette": "claude",
+    "palettes": {
+        "claude": {"band": "#3a2822", "name": "#d77757", "accent": "#e8957a", "waiting": "#ffc2a6", "working": "#b8bccb", "ready": "#8fdcb4"},
+        "plum":   {"band": "#3d2350", "name": "#e2c4ff", "accent": "#ff9b7a", "waiting": "#ff9b7a", "working": "#b9bce8", "ready": "#86e0aa"},
+        "teal":   {"band": "#123f42", "name": "#9fe6d8", "accent": "#ffa38a", "waiting": "#ffa38a", "working": "#b0c8e6", "ready": "#c2e88f"},
+        "wine":   {"band": "#4a1c2c", "name": "#f5cba7", "accent": "#ff9fb0", "waiting": "#ff9fb0", "working": "#cdbdf2", "ready": "#9de3b4"},
+        "forest": {"band": "#1d3a2a", "name": "#d4ecb4", "accent": "#ffa585", "waiting": "#ffa585", "working": "#b0c9e8", "ready": "#8fe0c4"},
+        "slate":  {"band": "#2a3247", "name": "#c9d3ff", "accent": "#ff9c87", "waiting": "#ff9c87", "working": "#b8bccb", "ready": "#8fdcb4"},
+    },
+}
+
+
+def theme() -> dict:
+    if not THEME.exists():
+        write_json(THEME, DEFAULT_THEME)
+    t = read_json(THEME, DEFAULT_THEME)
+    pal = dict(DEFAULT_THEME["palettes"]["claude"])
+    pal.update((t.get("palettes") or {}).get(t.get("palette", "claude"), {}))
+    band = pal["band"].lstrip("#")
+    rgb = [int(band[i:i + 2], 16) for i in (0, 2, 4)]
+    pal["off"] = "#" + "".join(f"{round(c * 0.86 + 255 * 0.14):02x}" for c in rgb)  # 14% white over band
+    return pal
+
+
+def apply_theme() -> None:
+    pal = theme()
+    for key in ("band", "name", "accent", "off"):
+        tmux("set-option", "-g", f"@grove_c_{key}", pal[key])
+    tmux("set-option", "-g", "pane-active-border-style", f"fg={pal['name']}")
+
+
+def ensure_session() -> None:
+    if run(["which", "tmux"]).returncode:
+        die("tmux is not installed: brew install tmux")
+    apply_theme()
+    if ui_mode() == "app":
+        return
+    if tmux("has-session", "-t", SESSION).returncode:
+        names = project_names()
+        start = str(project(names[0])["repo"]) if names else str(HOME)
+        tmux("new-session", "-d", "-s", SESSION, "-n", "hub", "-c", start)
+        tmux("send-keys", "-t", f"{SESSION}:hub", f"{BIN} ls", "C-m")
+
+
+def has_window(name: str) -> bool:
+    if tmux("has-session", "-t", SESSION).returncode:
+        return False
+    return name in tmux("list-windows", "-t", SESSION, "-F", "#W").stdout.split()
+
+
+LEGACY = "fh"  # the CLI's name before Grove: its tmux sessions and options are renamed on first use
+
+
+def rename_legacy_tmux() -> None:
+    """Sessions and tmux options from before the rename (fh_*, fh-park, @fh_*) take Grove's names,
+    still running. Safe to re-run; does nothing once they are gone."""
+    names = tmux("list-sessions", "-F", "#{session_name}").stdout.split()
+    for old in names:
+        new = PARK if old == f"{LEGACY}-park" else "grove_" + old[len(LEGACY) + 1:] if old.startswith(f"{LEGACY}_") else None
+        if new and new not in names:
+            tmux("rename-session", "-t", f"={old}", new)
+    for scope, listing, keys in (("-p", "list-panes", ("owner", "pane", "hint")), ("-w", "list-windows", ("feature", "path"))):
+        fmt = "\t".join(["#{" + ("pane_id" if scope == "-p" else "window_id") + "}"] + [f"#{{@{LEGACY}_{k}}}" for k in keys])
+        for line in tmux(listing, "-a", "-F", fmt).stdout.splitlines():
+            target, *values = line.split("\t")
+            for key, value in zip(keys, values):
+                if value:
+                    tmux("set-option", scope, "-t", target, f"@grove_{key}", value)
+                    tmux("set-option", scope, "-u", "-t", target, f"@{LEGACY}_{key}")
+
+
+def owned_panes(name: str) -> list[dict]:
+    """Every pane of a feature (tmux window, park or app sessions), as {id, pane, window, session}."""
+    out = tmux("list-panes", "-a", "-F", "#{pane_id}\t#{@grove_owner}\t#{@grove_pane}\t#{window_id}\t#{session_name}").stdout
+    rows = []
+    for line in out.splitlines():
+        pid, owner, pane, wid, sess = (line.split("\t") + [""] * 5)[:5]
+        if owner == name:
+            rows.append({"id": pid, "pane": pane, "window": wid, "session": sess})
+    return rows
+
+
+def find_pane(name: str, pane: str) -> str | None:
+    return next((r["id"] for r in owned_panes(name) if r["pane"] == pane), None)
+
+
+def tag(pane_id: str, owner: str, pane: str) -> None:
+    tmux("set-option", "-p", "-t", pane_id, "@grove_owner", owner)
+    tmux("set-option", "-p", "-t", pane_id, "@grove_pane", pane)
+
+
+def ensure_park() -> None:
+    if tmux("has-session", "-t", PARK).returncode:
+        tmux("new-session", "-d", "-s", PARK, "-n", "park", "sleep 2147483647")
+
+
+def park_new(f: dict, pane: dict, servers: bool) -> str:
+    """tmux UI: start a panel closed, in its own window of the park session."""
+    ensure_park()
+    cmd = pane_run(pane, f, servers)
+    r = tmux("new-window", "-d", "-a", "-P", "-F", "#{pane_id}", "-t", f"{PARK}:", "-n", f"{f['name']}_{pane['name']}",
+             "-c", str(Path(f["path"]) / pane.get("dir", "")), *([cmd] if cmd else []))
+    pid = r.stdout.strip()
+    if not pid:
+        die(f"could not start panel {pane['name']}: {r.stderr.strip()}")
+    tag(pid, f["name"], pane["name"])
+    tmux("set-option", "-p", "-t", pid, "@grove_hint", hint(f, pane["name"]))
+    return pid
+
+
+def paint_buttons(f: dict) -> None:
+    """tmux UI: the header's panel buttons, ■ open / □ closed, key letter underlined."""
+    pal = theme()
+    name = f["name"]
+    window = f"{SESSION}:{name}"
+    open_now = {r["pane"] for r in owned_panes(name) if r["session"] == SESSION}
+    parts = []
+    for pane in panels(f):
+        label, key = pane["name"], pane.get("key", "")
+        is_open = label in open_now
+        style = f"bg={pal['name']} fg=#000000 bold" if is_open else f"bg={pal['off']} fg=#eeeeee nobold"
+        text = label
+        if key and key in label:
+            i = label.index(key)
+            text = f"{label[:i]}#[underscore]{label[i]}#[nounderscore]{label[i + 1:]}"
+        parts.append(f"#[range=user|tog:{label[:11]}]#[{style}] {'■' if is_open else '□'} {text} #[norange bg={pal['band']} nobold] ")
+    parts.append("#[fg=#bcbcbc]^b P+key ")
+    tmux("set-option", "-w", "-t", window, "@grove_buttons", "".join(parts))
+    count = len([r for r in owned_panes(name) if r["session"] == SESSION])
+    tmux("set-option", "-w", "-t", window, "pane-border-status", "top" if count > 1 else "off")
+
+
+def bind_panel_keys(f: dict) -> None:
+    tmux("bind-key", "P", "switch-client", "-T", "grovepanel")
+    for pane in panels(f):
+        if pane.get("key"):
+            tmux("bind-key", "-T", "grovepanel", pane["key"], "run-shell", "-b",
+                 f"{BIN} toggle '#{{window_name}}' {pane['name']}")
+
+
+def host_session(name: str, pane: str) -> str:
+    return "grove_" + re.sub(r"[^A-Za-z0-9_-]", "_", name) + "_" + pane
+
+
+def host(f: dict, servers: bool = True) -> list[dict]:
+    """App mode: every pane of the feature in its own detached tmux session (status off), which the
+    app attaches a terminal to. Idempotent; panes from the tmux UI are moved over, still running."""
+    name = f["name"]
+    out = []
+    rows = owned_panes(name)
+    for pane in layout(f):
+        sess = host_session(name, pane["name"])
+        cwd = str(Path(f["path"]) / pane.get("dir", ""))
+        if tmux("has-session", "-t", f"={sess}").returncode:
+            existing = next((r for r in rows if r["pane"] == pane["name"] and not r["session"].startswith("grove_")), None)
+            if existing:
+                tmux("new-session", "-d", "-s", sess, "-c", cwd, "sleep 2147483647")
+                tmux("move-pane", "-s", existing["id"], "-t", f"={sess}:")
+                tmux("kill-pane", "-a", "-t", existing["id"])
+            else:
+                cmd = pane_run(pane, f, servers)
+                r = tmux("new-session", "-d", "-P", "-F", "#{pane_id}", "-s", sess, "-c", cwd, *([cmd] if cmd else []))
+                if r.returncode:
+                    die(f"could not start {sess}: {r.stderr.strip()}")
+                pid = r.stdout.strip()
+                tag(pid, name, pane["name"])
+                tmux("set-option", "-p", "-t", pid, "@grove_hint", hint(f, pane["name"]))
+        tmux("set-option", "-t", f"={sess}:", "status", "off")
+        tmux("set-option", "-t", f"={sess}:", "@grove_app", "1")
+        if pane["name"] != "claude":
+            out.append({"pane": pane["name"], "session": sess, "hint": hint(f, pane["name"]), "key": pane.get("key", "")})
+        else:
+            out.insert(0, {"pane": "claude", "session": sess, "hint": "", "key": ""})
+    if has_window(name) and not [r for r in owned_panes(name) if r["session"] == SESSION]:
+        tmux("kill-window", "-t", f"{SESSION}:{name}")
+    return out
+
+
+def open_window(f: dict, servers: bool = True) -> None:
+    if ui_mode() == "app":
+        host(f, servers)
+        return
+    ensure_session()
+    name, wt = f["name"], f["path"]
+    if has_window(name):
+        return
+    claude = layout(f)[0]
+    r = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", SESSION, "-n", name, "-c", wt, pane_run(claude, f, servers))
+    claude_id = r.stdout.strip()
+    if not claude_id:
+        die(f"could not open window {name}: {r.stderr.strip()}")
+    tag(claude_id, name, "claude")
+    target = f"{SESSION}:{name}"
+    tmux("set-option", "-w", "-t", target, "@grove_feature", name)
+    tmux("set-option", "-w", "-t", target, "@grove_path", wt)
+    have = {x["pane"] for x in owned_panes(name)}
+    for pane in panels(f):
+        if pane["name"] not in have:
+            park_new(f, pane, servers)
+    bind_panel_keys(f)
+    paint_buttons(f)
+
+
+def toggle(f: dict, panel: str, focus: bool | None = None) -> None:
+    name = f["name"]
+    pane = next((x for x in panels(f) if x["name"] == panel), None)
+    if pane is None:
+        die(f"no panel '{panel}' (panels: {', '.join(x['name'] for x in panels(f))})")
+    rows = owned_panes(name)
+    mine = next((x for x in rows if x["pane"] == panel), None)
+    if mine is None:
+        park_new(f, pane, servers=True)
+        mine = next(x for x in owned_panes(name) if x["pane"] == panel)
+    if mine["session"] == SESSION:
+        ensure_park()
+        r = tmux("break-pane", "-d", "-a", "-s", mine["id"], "-t", f"{PARK}:", "-n", f"{name}_{panel}")
+        if r.returncode:
+            die(f"could not close {panel}: {r.stderr.strip()}")
+    else:
+        open_rows = [x for x in rows if x["session"] == SESSION and x["pane"] != "claude"]
+        claude = next((x for x in rows if x["session"] == SESSION and x["pane"] == "claude"), None)
+        target = open_rows[-1]["id"] if open_rows else (claude["id"] if claude else f"{SESSION}:{name}.0")
+        split = ["-v"] if open_rows else ["-h", "-l", "40%"]
+        should_focus = pane.get("focus", False) if focus is None else focus
+        tmux("join-pane", *([] if should_focus else ["-d"]), *split, "-s", mine["id"], "-t", target)
+    paint_buttons(f)
+
+
+def switch_to(name: str) -> None:
+    target = f"{SESSION}:{name}"
+    if os.environ.get("TMUX"):
+        if tmux("switch-client", "-t", target).returncode:
+            tmux("select-window", "-t", target)
+    else:
+        tmux("select-window", "-t", target)
+        if not sys.stdout.isatty():
+            print(f"{name} selected — run `grove attach` in a terminal to see it")
+            return
+        os.execvp("tmux", ["tmux", "attach", "-t", SESSION])
+
+
+# ---------- PRs ----------
+
+def ci_state(rollup: list) -> str:
+    states = [(c.get("conclusion") or c.get("state") or c.get("status") or "").upper() for c in rollup or []]
+    if not states:
+        return "none"
+    if any(s in ("FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE") for s in states):
+        return "fail"
+    if any(s in ("IN_PROGRESS", "QUEUED", "PENDING", "WAITING", "EXPECTED", "") for s in states):
+        return "running"
+    return "pass"
+
+
+def pr_sync(force: bool = False) -> dict:
+    cache = read_json(PRS, {})
+    if not force and time.time() - cache.get("fetchedAt", 0) < PR_TTL:
+        return cache
+    by_branch: dict = {}
+    wanted = {f.get("project") or default_project() for f in features()} if features() else set()
+    for name in wanted:
+        p = project(name)
+        if p.get("prs") is False:
+            continue
+        r = run(["gh", "pr", "list", "--author", "@me", "--state", "all", "--limit", "60", "--json",
+                 "number,headRefName,state,isDraft,url,statusCheckRollup,reviewDecision,updatedAt"], cwd=p["repo"])
+        if r.returncode:
+            continue
+        for pr in json.loads(r.stdout):
+            b = pr["headRefName"]
+            if b in by_branch and by_branch[b]["state"] == "OPEN":
+                continue  # keep the open PR over an older closed one
+            by_branch[b] = {"number": pr["number"], "state": pr["state"], "isDraft": pr["isDraft"],
+                            "url": pr["url"], "ci": ci_state(pr["statusCheckRollup"]), "project": name,
+                            "review": pr.get("reviewDecision") or "", "updatedAt": pr["updatedAt"]}
+    for f in features():
+        pr = by_branch.get(f["branch"])
+        if pr and pr["state"] == "OPEN":
+            pr["findings"] = len(new_findings(project_of(f), pr["number"], pr["updatedAt"]))
+    cache = {"fetchedAt": time.time(), "byBranch": by_branch}
+    write_json(PRS, cache)
+    return cache
+
+
+def pr_for(f: dict) -> dict | None:
+    if f.get("kind") == "session":
+        return None
+    return read_json(PRS, {}).get("byBranch", {}).get(f["branch"])
+
+
+def bot_comments(p: dict, number: int) -> list[dict]:
+    r = run(["gh", "api", f"repos/:owner/:repo/pulls/{number}/comments", "--paginate", "--jq", ".[]"], cwd=p["repo"])
+    rows = [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+    return [c for c in rows if any(b in (c.get("user") or {}).get("login", "").lower() for b in BOTS)
+            and not c.get("in_reply_to_id")]
+
+
+def new_findings(p: dict, number: int, updated_at: str, refresh: bool = False, mark: bool = False) -> list[dict]:
+    fb = read_json(FEEDBACK, {})
+    key = f"{p['name']}#{number}"
+    seen = fb.get(key, fb.get(str(number)))
+    if seen is not None and seen.get("updatedAt") == updated_at and not (refresh or mark):
+        return list(seen.get("pending", []))
+    comments = bot_comments(p, number)
+    handled = set(seen["handled"]) if seen else {c["id"] for c in comments}  # first sighting: record only
+    pending = [c for c in comments if c["id"] not in handled]
+    slim = [{"id": c["id"], "path": c.get("path"), "line": c.get("line") or c.get("original_line"),
+             "url": c.get("html_url"), "body": c.get("body", "")[:600]} for c in pending]
+    if mark:
+        handled |= {c["id"] for c in pending}
+        slim = []
+    fb[key] = {"handled": sorted(handled), "pending": slim, "updatedAt": updated_at}
+    fb.pop(str(number), None)
+    write_json(FEEDBACK, fb)
+    return slim
+
+
+def severity(body: str) -> str:
+    if "🔴" in body or re.search(r"\bcritical\b", body, re.I):
+        return "critical"
+    if "🔵" in body:
+        return "suggestion"
+    return "important"
+
+
+# ---------- briefs ----------
+
+def service_urls(f: dict) -> str:
+    return ", ".join(f"{svc} http://localhost:{port}" for svc, port in ports(f).items())
+
+
+def write_brief(p: dict, f: dict, ticket: str | None, prompt: str | None) -> None:
+    head = []
+    if ticket:
+        head.append(f"# {ticket}\n\nFetch issue {ticket} with your tracker's tools (for Linear: get_issue, "
+                    "list_comments) and read its description and comments before you start.")
+    if prompt:
+        head.append(("" if ticket else "# Task\n\n") + prompt)
+    servers = ""
+    if ports(f):
+        servers = (f"Its services already run in panels beside you: {service_urls(f)}. Use exactly these ports "
+                   f"for curl and browser checks — never the project's defaults or another worktree's. "
+                   f"If a service is down, run `grove restart {f['name']}`.")
+    notes = f"\n{p['agentNotes']}" if p.get("agentNotes") else ""
+    body = f"""
+## How this run works
+You are working alone in worktree `{f['path']}` on branch `{f['branch']}`. {servers}{notes}
+
+## Finish like this
+- Keep to the task's scope. {p.get('checks') or DEFAULT_PROJECT['checks']}
+- Commit with a conventional message describing what the code does, push, and open a draft PR,
+  then invoke the `pr-watch-feedback` skill (if you have it) to see CI and review findings through.
+- End with a 3-line summary: what changed, what you verified, what you did not.
+"""
+    (feature_dir(f) / "brief.md").write_text("\n\n".join(head) + "\n" + body)
+
+
+# ---------- commands ----------
+
+def link_worktree(f: dict) -> None:
+    """A feature whose worktree lives elsewhere gets a `worktree` link in its folder."""
+    link = feature_dir(f) / "worktree"
+    if f.get("kind") != "session" and not link.exists() and not link.is_symlink() and Path(f["path"]).is_dir():
+        link.symlink_to(f["path"])
+
+
+def cmd_migrate() -> None:
+    """From the older layout (features/, status/, briefs/, projects/<name>.json) to one folder per
+    project and feature. Copies first, then parks the old files in old-layout/; safe to re-run.
+    Worktrees stay where they are (a Claude conversation can only resume from its own folder):
+    each feature folder links to its worktree instead."""
+    old = {"features": HUB / "features", "status": HUB / "status", "briefs": HUB / "briefs"}
+    flat = sorted(PROJECTS.glob("*.json"))
+    if not flat and not any(d.is_dir() for d in old.values()):
+        print("migrate: nothing to do, the hub already has one folder per project and feature")
+        return
+    park = HUB / "old-layout"
+    (park / "projects").mkdir(parents=True, exist_ok=True)
+    for path in flat:
+        if not project_conf(path.stem).exists():
+            write_json(project_conf(path.stem), read_json(path, {}))
+        path.rename(park / "projects" / path.name)
+    fallback = read_json(CONFIG, {}).get("defaultProject") or next(iter(project_names()), None)
+    moved = 0
+    for path in sorted(old["features"].glob("*.json")) if old["features"].is_dir() else []:
+        f = read_json(path, None)
+        if not f or not (f.get("project") or fallback):
+            print(f"migrate: skipped {path.name} (unreadable, or no project to put it in)")
+            continue
+        f["project"] = f.get("project") or fallback
+        home = feature_dir(f)
+        if not (home / "feature.json").exists():
+            save(f)
+        n = f["name"]
+        for src, leaf in ((old["status"] / f"{n}.json", "status.json"), (old["briefs"] / f"{n}.md", "brief.md"),
+                          (old["briefs"] / f"{n}.sent.md", "brief.sent.md")):
+            if src.exists() and not (home / leaf).exists():
+                shutil.copy2(src, home / leaf)
+        link_worktree(f)
+        moved += 1
+    for key, d in old.items():
+        if d.is_dir():
+            target = park / key
+            if target.exists():
+                shutil.rmtree(target)
+            d.rename(target)
+    print(f"migrate: {len(flat)} project(s), {moved} feature(s) moved; the old files are in {park}")
+    print("Restart running Claude sessions so the mod reports to the new place.")
+
+
+def slug(text: str) -> str:
+    """A feature name from whatever was typed: lowercase, words joined by -, at most 40 characters."""
+    words = re.sub(r"[^a-z0-9._]+", " ", text.lower()).split()
+    name = ""
+    for w in words:
+        if len(name) + len(w) + (1 if name else 0) > 40:
+            break
+        name = f"{name}-{w}" if name else w
+    return (name or "-".join(words)[:40]).strip("._-")
+
+
+def cmd_new(args: list[str]) -> None:
+    prompt = base = title = parent = proj = None
+    rest = []
+    it = iter(args)
+    for a in it:
+        if a in ("-p", "--prompt"):
+            prompt = " ".join(it) or None  # the rest of the line, quoted or not
+        elif a == "--base":
+            base = next(it, None)
+        elif a == "--title":
+            title = next(it, None)
+        elif a == "--parent":
+            parent = next(it, None)
+        elif a == "--project":
+            proj = next(it, None)
+        else:
+            rest.append(a)
+    if not rest:
+        die("grove new <name|TICKET-123> [--project P] [--title T] [--parent NAME] [--base REF] [-p PROMPT]")
+    if parent and not proj and registered(parent):
+        proj = feature(parent).get("project")
+    p = project(proj or project_here() or default_project())
+    arg = " ".join(rest).strip()  # `grove new main panel tabs` works unquoted too
+    ticket = arg.upper() if TICKET.match(arg) else None
+    name = slug(arg)
+    if not name:
+        die("give the feature a name with some letters or digits")
+    if name != arg.lower() and not title:
+        title = arg  # typed as words: keep them as the title, the slug names the folder, branch and tmux session
+    if registered(name):
+        die(f"feature '{name}' exists")
+    repo = p["repo"]
+    if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
+        die(f"{repo} is not a git repository (project {p['name']})")
+    wt = worktree_for(p, name)
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    branch = p["branchPrefix"].replace("{user}", handle(p)) + name
+    run(["git", "-C", str(repo), "fetch", "-q", "--prune", "origin"])
+    if wt.exists():
+        if run(["git", "-C", str(wt), "rev-parse", "--git-dir"]).returncode:
+            die(f"{wt} exists and is not a worktree")
+        branch = run(["git", "-C", str(wt), "branch", "--show-current"]).stdout.strip()
+    elif run(["git", "-C", str(repo), "show-ref", "-q", "--verify", f"refs/heads/{branch}"]).returncode == 0:
+        run(["git", "-C", str(repo), "worktree", "add", "-q", str(wt), branch], check=True)
+    else:
+        start = base or p["base"]
+        if run(["git", "-C", str(repo), "rev-parse", "-q", "--verify", start]).returncode:
+            start = "HEAD"  # a repo without that ref (no remote yet)
+        run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", branch, str(wt), start], check=True)
+    taken = listening() | {port for other in features() for port in ports(other).values()}
+    assigned = {}
+    for s in services(p):
+        assigned[s["name"]] = alloc(s, taken | set(assigned.values()))
+    f = {"name": name, "project": p["name"], "path": str(wt), "branch": branch, "ports": assigned,
+         "ticket": ticket, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    f["links"] = {s["name"]: fill(s["open"], f, assigned[s["name"]]) for s in services(p) if s.get("open")}
+    if p.get("agentNotes"):
+        f["agentNotes"] = p["agentNotes"]
+    if title:
+        f["title"] = title
+    if parent:
+        f["parent"] = parent
+    provision(p, f)
+    save(f)
+    if ticket or prompt:
+        write_brief(p, f, ticket, prompt)
+    open_window(f)
+    write_json(HUB / "focus.json", {"name": name, "at": time.time()})  # the app switches to it
+    print(f"{name}: {wt} [{branch}]  {service_urls(f) or 'no services'}" + ("  (agent briefed)" if ticket or prompt else ""))
+
+
+def cmd_adopt(args: list[str]) -> None:
+    """Register an existing worktree as a feature: nothing new is created; it gets its own ports, its
+    env rewritten, and sessions with services stopped (start them with grove up). With --session <id>,
+    bring in a Claude conversation from the main checkout instead."""
+    if "--session" in args:
+        i = args.index("--session")
+        title = args[args.index("--title") + 1] if "--title" in args else None
+        for sid in [a for a in args[i + 1:] if re.match(r"^[0-9a-f-]{36}$", a)]:
+            adopt_session(sid, title)
+        return
+    title = proj = name = None
+    paths = []
+    it = iter(args)
+    for a in it:
+        if a == "--title":
+            title = next(it, None)
+        elif a == "--project":
+            proj = next(it, None)
+        elif a == "--name":
+            name = next(it, None)
+        else:
+            paths.append(a)
+    if not paths:
+        die("adopt <worktree path>… [--name N] [--title T] [--project P]")
+    for raw in paths:
+        wt = expand(raw)
+        if run(["git", "-C", str(wt), "rev-parse", "--git-dir"]).returncode:
+            print(f"grove: {wt} is not a git worktree", file=sys.stderr)
+            continue
+        common = expand(run(["git", "-C", str(wt), "rev-parse", "--path-format=absolute", "--git-common-dir"]).stdout.strip())
+        p = project(proj) if proj else next(
+            (project(n) for n in project_names() if (project(n)["repo"] / ".git").resolve() == common), None)
+        if p is None:
+            print(f"grove: {wt} belongs to no registered project (grove project add <its main checkout>)", file=sys.stderr)
+            continue
+        if any(f["path"] == str(wt) for f in features()):
+            print(f"{wt}: already a feature")
+            continue
+        branch = run(["git", "-C", str(wt), "branch", "--show-current"]).stdout.strip()
+        tail = branch.split("/")[-1] or wt.name
+        fname = (name if name and len(paths) == 1 else re.sub(r"[^a-z0-9._-]+", "-", tail.lower()))[:40].strip("-.")
+        if registered(fname):
+            fname = f"{fname[:36]}-{wt.name[-3:]}"
+        m = re.match(r"^([a-z][a-z0-9]*-\d+)", fname)
+        pr_title = run(["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "title",
+                        "--jq", ".[0].title // \"\""], cwd=p["repo"]).stdout.strip() if branch else ""
+        taken = listening() | {port for other in features() for port in ports(other).values()}
+        assigned = {}
+        for svc in services(p):
+            assigned[svc["name"]] = alloc(svc, taken | set(assigned.values()))
+        f = {"name": fname, "project": p["name"], "path": str(wt), "branch": branch, "ports": assigned,
+             "ticket": m.group(1).upper() if m else None,
+             "title": title if title and len(paths) == 1 else tidy_title(pr_title) or tail.replace("-", " ").strip().capitalize(),
+             "adopted": True, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        f["links"] = {svc["name"]: fill(svc["open"], f, assigned[svc["name"]]) for svc in services(p) if svc.get("open")}
+        if p.get("agentNotes"):
+            f["agentNotes"] = p["agentNotes"]
+        provision(p, f)
+        save(f)
+        link_worktree(f)
+        open_window(f, servers=False)
+        print(f"{fname}: adopted {wt} [{branch}] “{f['title']}”  {service_urls(f)} (services stopped: grove up {fname})")
+
+
+TRANSCRIPTS = HOME / ".claude/projects"
+
+
+def mangle(path: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def transcript_info(path: Path) -> dict:
+    """id, folder, branch and title of a Claude Code transcript (its first cwd, its last aiTitle)."""
+    info = {"id": path.stem, "cwd": "", "branch": "", "title": "", "mtime": path.stat().st_mtime}
+    try:
+        with path.open() as stream:
+            for line in stream:
+                if not info["cwd"] and '"cwd":"' in line:
+                    info["cwd"] = re.search(r'"cwd":"([^"]*)"', line).group(1)
+                    m = re.search(r'"gitBranch":"([^"]*)"', line)
+                    info["branch"] = m.group(1) if m else ""
+                if '"aiTitle":"' in line:
+                    info["title"] = re.search(r'"aiTitle":"([^"]*)"', line).group(1)
+    except OSError:
+        pass
+    return info
+
+
+def recent_sessions(p: dict, hours: float) -> list[dict]:
+    """Claude conversations in the project's main checkout (or below it) touched in the last `hours`,
+    leaving out feature worktrees and sessions already in Grove."""
+    repo = str(p["repo"])
+    taken = {f.get("session") for f in features()}
+    worktrees = [f["path"] for f in features() if f.get("kind") != "session"]
+    cutoff = time.time() - hours * 3600
+    found = []
+    for folder in TRANSCRIPTS.glob(mangle(repo) + "*"):
+        for t in folder.glob("*.jsonl"):
+            if t.stat().st_mtime < cutoff or t.stem in taken:
+                continue
+            info = transcript_info(t)
+            cwd = info["cwd"]
+            if not (cwd == repo or cwd.startswith(repo + "/")) or any(cwd == w or cwd.startswith(w + "/") for w in worktrees):
+                continue
+            found.append(info)
+    return sorted(found, key=lambda i: -i["mtime"])
+
+
+def adopt_session(sid: str, title: str | None) -> None:
+    path = next(TRANSCRIPTS.glob(f"*/{sid}.jsonl"), None)
+    if path is None:
+        die(f"no Claude conversation {sid} under {TRANSCRIPTS}")
+    info = transcript_info(path)
+    p = next((project(n) for n in project_names()
+              if info["cwd"] == str(project(n)["repo"]) or info["cwd"].startswith(str(project(n)["repo"]) + "/")), None)
+    if p is None:
+        die(f"{info['cwd']} is in no registered project")
+    name = f"s-{sid[:8]}"
+    if registered(name):
+        print(f"{name}: already in Grove")
+        return
+    f = {"name": name, "kind": "session", "session": sid, "project": p["name"], "path": info["cwd"],
+         "branch": info["branch"] or run(["git", "-C", info["cwd"], "branch", "--show-current"]).stdout.strip(),
+         "ports": {}, "title": title or info["title"] or f"Session {sid[:8]}", "confirmResume": True,
+         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    save(f)
+    open_window(f)
+    rel = info["cwd"][len(str(p["repo"])):].lstrip("/") or "main checkout"
+    print(f"{name}: “{f['title']}” ({rel}) — type /exit in its old terminal, then press Enter in its Grove panel")
+
+
+def cmd_sessions(args: list[str]) -> None:
+    hours = float(args[args.index("--hours") + 1]) if "--hours" in args else 24
+    p = project(args[args.index("--project") + 1] if "--project" in args else project_here() or default_project())
+    rows = recent_sessions(p, hours)
+    if not rows:
+        print(f"no Claude conversations in {p['repo']} in the last {hours:g}h outside feature worktrees")
+    for i in rows:
+        rel = i["cwd"][len(str(p["repo"])):].lstrip("/") or "."
+        age = time.strftime("%m-%d %H:%M", time.localtime(i["mtime"]))
+        print(f"{i['id']}  {age}  {rel:<14} {i['title'] or '(untitled)'}")
+
+
+def tidy_title(text: str) -> str:
+    """A PR title as a sidebar title: no conventional-commit prefix, no trailing ticket."""
+    text = re.sub(r"^\w+(\([^)]*\))?!?:\s*", "", text.strip())
+    text = re.sub(r"\s*\(([A-Z][A-Z0-9]*-\d+)\)\s*$", "", text)
+    return text[:1].upper() + text[1:]
+
+
+def claude_running_in(path: str) -> list[str]:
+    """Claude processes whose working directory is this worktree (or below), outside Grove's sessions."""
+    found = []
+    for pid in run(["pgrep", "-x", "claude"]).stdout.split():
+        cwd = next((ln[1:] for ln in run(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"]).stdout.splitlines()
+                    if ln.startswith("n")), "")
+        if cwd == path or cwd.startswith(path + "/"):
+            tty = run(["ps", "-o", "tty=", "-p", pid]).stdout.strip()
+            found.append(f"pid {pid} ({tty})")
+    return found
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    except PermissionError:
+        return True
+
+
+def awake_pid() -> int | None:
+    """The running keep-awake watcher, if there is one."""
+    try:
+        pid = int(AWAKE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid_alive(pid) else None
+
+
+def agents_working() -> list[str]:
+    """Features whose session says it is working and whose Claude is still running (a state left
+    behind by a crash or a reboot does not count)."""
+    return [f["name"] for f in features()
+            if status_of(f).get("state") == "working"
+            and claude_running_in(f["path"])]
+
+
+def keepawake_loop() -> None:
+    """Hold a `caffeinate` while any agent works; exit once none do. It dies with this process (-w)."""
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    AWAKE.write_text(str(os.getpid()))
+    hold = None
+    try:
+        while True:
+            if read_json(CONFIG, {}).get("keepAwake", True) and agents_working():
+                if hold is None or hold.poll() is not None:
+                    # -i: no idle sleep; -s: no system sleep while on power; -m: disks stay up
+                    hold = subprocess.Popen(["caffeinate", "-ims", "-w", str(os.getpid())])
+                time.sleep(AWAKE_POLL)
+                continue
+            # let go, then look once more: a session may have started work as the pid file went
+            AWAKE.unlink(missing_ok=True)
+            if read_json(CONFIG, {}).get("keepAwake", True) and agents_working():
+                AWAKE.write_text(str(os.getpid()))
+                continue
+            return
+    finally:
+        if hold is not None and hold.poll() is None:
+            hold.terminate()
+        if awake_pid() in (None, os.getpid()):
+            AWAKE.unlink(missing_ok=True)
+
+
+def cmd_keepawake(args: list[str]) -> None:
+    cfg = read_json(CONFIG, {})
+    if args[:1] in (["on"], ["off"]):
+        cfg["keepAwake"] = args[0] == "on"
+        write_json(CONFIG, cfg)
+    if "--run" in args:
+        keepawake_loop()
+        return
+    on = cfg.get("keepAwake", True)
+    pid = awake_pid()
+    if on and pid is None and "--status" not in args and sys.platform == "darwin" and agents_working():
+        pid = subprocess.Popen([sys.executable, os.path.abspath(__file__), "keepawake", "--run"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               start_new_session=True).pid
+    if pid is not None and not on:
+        os.kill(pid, signal.SIGTERM)
+        pid = None
+    working = agents_working()
+    state = "off" if not on else f"holding the Mac awake for {', '.join(working)}" if pid and working else "idle"
+    print(f"keepawake: {state}")
+
+
+RECAP_SYSTEM = """You keep a recap of one coding feature that its developer scans in seconds.
+Reply with JSON only, no prose and no code fence:
+{"goal": "...", "done": ["..."], "now": "...", "next": ["..."], "decisions": ["..."], "blockers": ["..."]}
+- goal: what the feature is for, at most 10 words
+- done: finished work, oldest first
+- now: what is happening at this moment, at most 8 words
+- next: the next concrete steps, most urgent first
+- decisions: choices made that someone picking this up must know
+- blockers: what stops progress or waits on the developer; [] when nothing does
+Write fragments, not sentences: no "I", no "we", no trailing periods. At most 8 words per item and
+5 items per list, the most important kept. Keep the previous recap's wording for items that still hold,
+drop what is no longer true, never invent anything the material does not show."""
+
+
+def transcript_of(f: dict) -> Path | None:
+    """The Claude conversation behind a feature: its own for a session, else the latest in its worktree."""
+    if f.get("kind") == "session":
+        return next(TRANSCRIPTS.glob(f"*/{f['session']}.jsonl"), None)
+    rows = sorted((TRANSCRIPTS / mangle(f["path"])).glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+    return rows[-1] if rows else None
+
+
+def conversation(path: Path, keep: int = 12000) -> tuple[str, str]:
+    """The first request and the latest exchanges of a transcript, as short plain lines."""
+    task, lines = "", []
+    with path.open() as stream:
+        for raw in stream:
+            if '"type":"user"' not in raw and '"type":"assistant"' not in raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue
+            if row.get("type") not in ("user", "assistant") or row.get("isMeta") or row.get("isSidechain"):
+                continue
+            content = (row.get("message") or {}).get("content")
+            blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content or []
+            blocks = [b for b in blocks if isinstance(b, dict)]
+            text = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+            if row["type"] == "user":
+                if text and not text.startswith("<"):  # tool results and harness notes are not requests
+                    task = task or text
+                    lines.append(f"developer: {text[:600]}")
+                continue
+            if text:
+                lines.append(f"claude: {text[:600]}")
+            tools = [b.get("name", "") for b in blocks if b.get("type") == "tool_use"]
+            if tools:
+                lines.append(f"  (used {', '.join(tools)})")
+    return task[:1500], "\n".join(lines)[-keep:]
+
+
+def git_facts(f: dict) -> dict:
+    """What git says about the feature: its commits since the base, the files it touches, its HEAD."""
+    path = f["path"]
+    base = project_of(f).get("base") or "origin/main"
+    if run(["git", "-C", path, "rev-parse", "-q", "--verify", base]).returncode:
+        base = "main"
+    commits = run(["git", "-C", path, "log", "--format=%s", f"{base}..HEAD"]).stdout.splitlines()
+    committed = run(["git", "-C", path, "diff", "--name-only", f"{base}...HEAD"]).stdout.splitlines()
+    dirty = [ln[3:] for ln in run(["git", "-C", path, "status", "--porcelain"]).stdout.splitlines()]
+    head = run(["git", "-C", path, "rev-parse", "HEAD"]).stdout.strip()
+    return {"commits": commits, "files": sorted(set(committed) | set(dirty)), "dirty": len(dirty), "head": head}
+
+
+def ask_model(model: str, system: str, prompt: str, timeout: int = 180) -> dict | str:
+    """One question to a model through the claude CLI; the JSON object it replies with, or what went wrong."""
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_PLUGIN_DIRS"}
+    try:
+        # no user settings (so no Grove mod or hooks in this side call), no tools, nothing saved
+        r = subprocess.run(["claude", "-p", "--setting-sources", "project", "--model", model, "--tools", "",
+                            "--strict-mcp-config", "--no-session-persistence", "--output-format", "text",
+                            "--system-prompt", system], input=prompt, text=True, capture_output=True,
+                           cwd=HUB, env=env, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return str(e)
+    m = re.search(r"\{[\s\S]*\}", r.stdout)
+    try:
+        got = json.loads(m.group(0)) if m else None
+    except ValueError:
+        got = None
+    return got if isinstance(got, dict) else (r.stderr or r.stdout).strip()[:200] or "no JSON in the reply"
+
+
+def write_recap(f: dict, prev: dict, force: bool) -> tuple[dict, str]:
+    """Ask a small model for the recap; returns it and what happened."""
+    t = transcript_of(f)
+    g = git_facts(f)
+    source = f"{t.stat().st_size if t else 0}:{g['head']}:{g['dirty']}"
+    if not force and prev.get("source") == source:
+        return prev, "up to date"
+    task, tail = conversation(t) if t else ("", "")
+    brief = next((p.read_text() for p in (feature_dir(f) / "brief.md", feature_dir(f) / "brief.sent.md") if p.exists()), "")
+    commits = "\n".join(f"- {c}" for c in g["commits"][:20]) or "none"
+    files = ", ".join(g["files"][:15]) + (f" (+{len(g['files']) - 15} more)" if len(g["files"]) > 15 else "")
+    old = {k: prev[k] for k in ("goal", "done", "now", "next", "decisions", "blockers") if k in prev}
+    prompt = (f"Feature: {f['name']}{' (' + f['ticket'] + ')' if f.get('ticket') else ''} — {f.get('title') or f['name']}\n\n"
+              f"Task as given:\n{(brief or task)[:1500] or 'not recorded'}\n\n"
+              f"Commits on the branch:\n{commits}\n\nFiles touched: {files or 'none'}\n\n"
+              f"Previous recap: {json.dumps(old) if old else 'none'}\n\n"
+              f"Conversation, latest last:\n{tail or 'none yet'}")
+    got = ask_model(RECAP_MODEL, RECAP_SYSTEM, prompt)
+    if isinstance(got, str):
+        return prev, f"failed: {got}"
+
+    def tidy(value, width: int) -> str:
+        return " ".join(str(value).split())[:width].rstrip(" .")
+
+    def items(key: str) -> list[str]:
+        rows = got.get(key) if isinstance(got.get(key), list) else []
+        return [tidy(x, 70) for x in rows if str(x).strip()][:5]
+
+    recap = {"goal": tidy(got.get("goal") or prev.get("goal", ""), 90), "done": items("done"),
+             "now": tidy(got.get("now") or "", 70), "next": items("next"), "decisions": items("decisions"),
+             "blockers": items("blockers"), "commits": len(g["commits"]), "files": len(g["files"]),
+             "updatedAt": int(time.time() * 1000), "source": source}
+    write_json(feature_dir(f) / "recap.json", recap)
+    return recap, "written"
+
+
+def cmd_recap(args: list[str]) -> None:
+    names = [a for a in args if not a.startswith("--")]
+    if not names:
+        die("recap <name> [--force] [--bg]")
+    f = feature(names[0])
+    force = "--force" in args
+    if "--bg" in args:
+        # detached, so a session's turn never waits on it; it spaces itself out (--wait)
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "recap", f["name"], "--wait", *(["--force"] if force else [])],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        print(f"{f['name']}: recap on its way")
+        return
+    home = feature_dir(f)
+    home.mkdir(parents=True, exist_ok=True)
+    lock = home / "recap.lock"
+    try:
+        held = int(lock.read_text().strip())
+    except (OSError, ValueError):
+        held = None
+    if held and held != os.getpid() and pid_alive(held):
+        print(f"{f['name']}: a recap is already being written")
+        return
+    lock.write_text(str(os.getpid()))
+    try:
+        prev = read_json(home / "recap.json", {})
+        if "--wait" in args and not force:
+            # a trailing refresh: the last turn of a burst still gets its recap, just a little later
+            time.sleep(max(0.0, RECAP_GAP - (time.time() - prev.get("updatedAt", 0) / 1000)))
+        recap, what = write_recap(f, prev, force)
+    finally:
+        lock.unlink(missing_ok=True)
+    if what.startswith("failed"):
+        die(f"recap of {f['name']} {what}")
+    print(f"{f['name']}: recap {what}")
+    print(json.dumps({k: recap.get(k) for k in ("goal", "done", "now", "next", "decisions", "blockers")}, indent=2, ensure_ascii=False))
+
+
+RETRO_SYSTEM = """You write the retro for one feature that a developer built together with a Claude Code agent.
+It is read before the next feature, to work better with agents. Look at how the work went, not at what
+was built: the task and how it was briefed, scope and planning, verification and testing, tooling and
+environment (Grove, tmux, git, CI, the app), mistakes, rework and their causes, waits, what the agent did
+well or badly, and what the developer could do differently.
+Reply with JSON only, no prose and no code fence: {"well": ["..."], "didnt": ["..."], "try": ["..."]}
+- well: what worked and is worth repeating
+- didnt: what slowed things down or went wrong, with its cause
+- try: concrete changes for the next feature (a line for the brief, a check to run, a CLAUDE.md rule, a tool)
+Fragments, not sentences: no "I" or "we", no trailing periods, at most 14 words per item, 3 to 6 items per
+list. Every item must come from this feature's material; no generic advice."""
+
+RETRO_HEADINGS = (("well", "What went well"), ("didnt", "What didn’t"), ("try", "What to try next time"))
+
+
+def cmd_retro(name: str) -> None:
+    f = feature(name)
+    home = feature_dir(f)
+    talks = sorted((TRANSCRIPTS / mangle(f["path"])).glob("*.jsonl"), key=lambda p: p.stat().st_mtime) \
+        if f.get("kind") != "session" else [t for t in [transcript_of(f)] if t]
+    parts = [conversation(t, 40000 // max(1, len(talks)))[1] for t in talks]
+    task = next((conversation(t)[0] for t in talks if conversation(t)[0]), "")
+    brief = next((p.read_text() for p in (home / "brief.md", home / "brief.sent.md") if p.exists()), "")
+    g = git_facts(f)
+    recap = read_json(home / "recap.json", {})
+    notes = (home / "notes.md").read_text()[:3000] if (home / "notes.md").exists() else ""
+    prompt = (f"Feature: {f['name']} — {f.get('title') or f['name']}\n\nTask as given:\n{(brief or task)[:1500] or 'not recorded'}\n\n"
+              f"Recap: {json.dumps({k: recap.get(k) for k in ('goal', 'done', 'decisions', 'blockers')})}\n\n"
+              f"Commits:\n" + ("\n".join(f"- {c}" for c in g["commits"][:30]) or "none") + "\n\n"
+              f"Developer's notes:\n{notes or 'none'}\n\n"
+              f"Conversation{'s' if len(parts) > 1 else ''}, oldest first:\n" + ("\n\n---\n\n".join(parts) or "none"))
+    print(f"{f['name']}: drafting the retro from {len(talks)} conversation(s)…", flush=True)
+    got = ask_model(RETRO_MODEL, RETRO_SYSTEM, prompt, timeout=300)
+    if isinstance(got, str):
+        die(f"retro of {f['name']} failed: {got}")
+    sections = []
+    for key, heading in RETRO_HEADINGS:
+        rows = got.get(key) if isinstance(got.get(key), list) else []
+        bullets = "\n".join(f"- {' '.join(str(x).split()).rstrip(' .')}" for x in rows if str(x).strip())
+        sections.append(f"## {heading}\n\n{bullets}")
+    text = (f"# Retro: {f.get('title') or f['name']}\n\n"
+            f"_Drafted {time.strftime('%Y-%m-%d')} from the conversation and git; edit freely._\n\n" + "\n\n".join(sections) + "\n")
+    old = home / "retro.md"
+    if old.exists() and old.read_text().strip():
+        old.replace(home / "retro.prev.md")  # one step of undo
+    write_text(old, text)
+    print(text)
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
+def claude_in_pane(session: str) -> bool:
+    """Whether Claude runs in the session's pane (grove agent execs it, so it is the pane shell's child)."""
+    pid = tmux("display", "-p", "-t", f"={session}:", "#{pane_pid}").stdout.strip()
+    return bool(pid) and run(["pgrep", "-P", pid, "-x", "claude"]).returncode == 0
+
+
+def cmd_send(name: str, text: str) -> None:
+    """Type text into a feature's Claude session as one message (a bracketed paste, then Enter)."""
+    f = feature(name)
+    if not text.strip():
+        die("send <name> <text…>: nothing to send")
+    session = host_session(f["name"], "claude")
+    if tmux("has-session", "-t", f"={session}").returncode:
+        host(f, servers=False)
+    for _ in range(40):  # a fresh session needs a few seconds before Claude takes input
+        if claude_in_pane(session):
+            break
+        time.sleep(0.5)
+    else:
+        die(f"{f['name']}: Claude is not running in its session (open the feature in Grove, then send again)")
+    time.sleep(0.5)
+    buf = f"grove-send-{os.getpid()}"
+    tmux("set-buffer", "-b", buf, "--", text.strip())
+    tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", f"={session}:")
+    time.sleep(0.3)
+    tmux("send-keys", "-t", f"={session}:", "Enter")
+    print(f"{f['name']}: sent to Claude ({len(text.strip())} characters)")
+
+
+def cmd_agent(name: str) -> None:
+    f = feature(name)
+    os.chdir(f["path"])
+    if f.get("kind") == "session":
+        if f.get("confirmResume"):
+            print(f"“{f['title']}” moves here from where it was running.")
+            print("First type /exit in its old terminal tab (two live copies of one conversation would")
+            print("interleave), then press Enter here to resume it.  Ctrl-C leaves this panel as a shell.")
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt):
+                os.execvp(os.environ.get("SHELL", "zsh"), [os.environ.get("SHELL", "zsh")])
+            f.pop("confirmResume", None)
+            save(f)
+        os.execvp("claude", ["claude", "--resume", f["session"]])
+    others = claude_running_in(f["path"])
+    if others:
+        print(f"Claude is already running in this worktree in another terminal: {', '.join(others)}.")
+        print("Two sessions on one worktree would trip over each other. Exit that one, then press Enter")
+        print("here to continue its conversation in Grove (or Ctrl-C to leave this panel as a shell).")
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            os.execvp(os.environ.get("SHELL", "zsh"), [os.environ.get("SHELL", "zsh")])
+    brief = feature_dir(f) / "brief.md"
+    if brief.exists():
+        text = brief.read_text()
+        brief.rename(brief.with_suffix(".sent.md"))
+        os.execvp("claude", ["claude", text])
+    transcripts = HOME / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", f["path"])
+    if any(transcripts.glob("*.jsonl")):
+        os.execvp("claude", ["claude", "--continue"])
+    os.execvp("claude", ["claude"])
+
+
+def cmd_serve(svc: str, name: str) -> None:
+    f = feature(name)
+    service = next((s for s in services(project_of(f)) if s["name"] == svc), None)
+    if service is None:
+        die(f"no service '{svc}' in project {f.get('project')}")
+    port = ports(f).get(svc)
+    if port:
+        stop_port(port)
+    os.chdir(Path(f["path"]) / service.get("dir", ""))
+    os.execvp("bash", ["bash", "-c", fill(service["run"], f, port)])
+
+
+def cmd_servers(name: str, up: bool) -> None:
+    f = feature(name)
+    ensure_session()
+    if ui_mode() == "app":
+        host(f)
+    elif not has_window(name):
+        open_window(f, servers=up)
+        print(f"{name}: window opened, services {'starting' if up else 'stopped'}")
+        return
+    if not up:
+        for port in ports(f).values():
+            stop_port(port)
+    for pane in layout(f):
+        if pane.get("service") and (pid := find_pane(name, pane["name"])):
+            tmux("respawn-pane", "-k", "-t", pid, "-c", str(Path(f["path"]) / pane.get("dir", "")), pane_run(pane, f, up))
+    print(f"{name}: services {'restarting' if up else 'stopped'}")
+
+
+def cmd_ls() -> None:
+    regs = features()
+    if not regs:
+        print("(no features — grove new <name|TICKET-123>)")
+        return
+    live = listening()
+    pr_sync()
+    print(f"{'FEATURE':<22} {'PROJECT':<12} {'SERVICES':<24} {'LABELS':<14} {'PR':<15} {'STATE':<8} WORK → NEXT")
+    for f in regs:
+        status = status_of(f)
+        work = " → ".join(x for x in (status.get("work"), status.get("next")) if x) or "-"
+        svcs = " ".join(f"{s}:{port}{'●' if port in live else '○'}" for s, port in ports(f).items()) or "-"
+        try:
+            labs = " ".join(f"{n}:{v}" for n, v in labels(project_of(f), f)) or "-"
+        except SystemExit:
+            labs = "?"
+        pr = pr_for(f)
+        prs = "-"
+        if pr:
+            mark = {"pass": "✓", "fail": "✗", "running": "⟳", "none": ""}[pr["ci"]]
+            prs = f"#{pr['number']} {pr['state'].lower()}{' ' + mark if pr['state'] == 'OPEN' else ''}"
+            if pr.get("findings"):
+                prs += f" 💬{pr['findings']}"
+        print(f"{f['name']:<22} {f.get('project', '?'):<12} {svcs:<24} {labs:<14} {prs:<15} "
+              f"{status.get('state', '-'):<8} {work[:60]}")
+
+
+def cmd_findings(name: str, brief: bool, mark: bool) -> None:
+    f = feature(name)
+    p = project_of(f)
+    pr = pr_for(f) or pr_sync(force=True).get("byBranch", {}).get(f["branch"])
+    if not pr:
+        die(f"{name}: no PR for {f['branch']}")
+    pending = new_findings(p, pr["number"], pr["updatedAt"], refresh=True)
+    if not pending:
+        print(f"{name}: no unanswered review-bot findings on #{pr['number']}")
+        return
+    if brief:
+        lines = [f"The review bots left {len(pending)} comment(s) on PR #{pr['number']} that nobody has answered yet."]
+        for i, c in enumerate(pending, 1):
+            title = c["body"].strip().splitlines()[0][:120] if c["body"].strip() else "(no text)"
+            lines += [f"{i}. [{severity(c['body'])}] {title}", f"   {c['path']}:{c['line']}   {c['url']}",
+                      "   " + c["body"].replace("\n", "\n   ")]
+        lines += ["For each one:",
+                  "- Read the code first. If the finding is wrong, say so in a reply and leave the code alone — a rebuttal is a valid outcome.",
+                  "- If it is right, fix it properly rather than to the letter of the suggested patch.",
+                  "- Reply on the thread saying what you did (`gh api repos/:owner/:repo/pulls/comments/<id>/replies -f body=...`).",
+                  "- Re-run the checks that cover what you touched, then commit and push.",
+                  "- Do not touch anything the comments did not raise."]
+        print("\n".join(lines))
+    else:
+        for c in pending:
+            print(f"[{severity(c['body'])}] {c['path']}:{c['line']}  {c['url']}")
+    if mark:
+        new_findings(p, pr["number"], pr["updatedAt"], mark=True)
+
+
+def merged_and_clean(f: dict) -> str | None:
+    pr = pr_for(f)
+    if not pr or pr["state"] != "MERGED":
+        return None
+    if run(["git", "-C", f["path"], "status", "--porcelain"]).stdout.strip():
+        return None
+    return f"#{pr['number']} merged"
+
+
+def unfinished(f: dict) -> list[str]:
+    """Why closing a feature could lose work. Empty when it is committed, merged and has no open PR."""
+    path = f["path"]
+    if f.get("kind") == "session" or not Path(path).is_dir():
+        return []  # an adopted session's folder isn't Grove's to remove; a missing worktree has nothing to lose
+    why = []
+    dirty = run(["git", "-C", path, "status", "--porcelain"]).stdout.splitlines()
+    if dirty:
+        why.append(f"{len(dirty)} uncommitted change{'s' if len(dirty) != 1 else ''}")
+    base = project_of(f).get("base") or "origin/main"
+    local = base.split("/", 1)[1] if base.startswith("origin/") else base
+    heads = [b for b in dict.fromkeys((base, local)) if not run(["git", "-C", path, "rev-parse", "-q", "--verify", b]).returncode]
+    # merged = every commit is on the base (local or remote), or its PR merged (squash merges leave the commits behind)
+    ahead = int(run(["git", "-C", path, "rev-list", "--count", "HEAD", "--not", *heads]).stdout.strip() or 0) if heads else -1
+    pr = pr_for(f) if ahead else None
+    if ahead and not (pr and pr["state"] == "MERGED"):
+        pr = pr_sync().get("byBranch", {}).get(f["branch"])
+    if pr and pr["state"] == "OPEN":
+        why.append(f"pull request #{pr['number']} is still open")
+    elif ahead and not (pr and pr["state"] == "MERGED"):
+        why.append(f"{ahead} commit{'s' if ahead != 1 else ''} not merged into {local}" if ahead > 0 else f"no {base} to compare with")
+    return why
+
+
+def archive(f: dict, home: Path) -> list[str]:
+    """Keep what you wrote (scratchpad notes, the retro) in the project's archive/<feature>/; the rest is state."""
+    kept = [leaf for leaf in ("notes.md", "retro.md") if (home / leaf).is_file() and (home / leaf).read_text().strip()]
+    if kept:
+        dest = PROJECTS / (f.get("project") or default_project()) / "archive" / f["name"]
+        if dest.exists():
+            dest = dest.with_name(f"{f['name']}-{time.strftime('%Y%m%d-%H%M%S')}")
+        dest.mkdir(parents=True)
+        for leaf in kept:
+            shutil.move(str(home / leaf), dest / leaf)
+    return kept
+
+
+def cmd_done(name: str, keep: bool = False, force: bool = False, check: bool = False) -> None:
+    """Close a feature. By default everything goes: servers, sessions, worktree, branch and its folder (notes
+    and retro are archived). If it may not be finished, refuse unless --force; --keep keeps worktree and branch."""
+    f = feature(name)
+    why = [] if keep else unfinished(f)
+    if check:
+        print(json.dumps({"reasons": why}))
+        return
+    if why and not force:
+        print(f"grove: {name} may not be finished: {'; '.join(why)}.\n"
+              f"  grove done {name} --force   remove it anyway (unmerged work is lost)\n"
+              f"  grove done {name} --keep    close it, keep the worktree and branch", file=sys.stderr)
+        sys.exit(3)
+    panes = layout(f) if f.get("project") or project_names() else []
+    for port in ports(f).values():
+        stop_port(port)
+    home = feature_dir(f)
+    if keep or f.get("kind") == "session":
+        for leaf in ("feature.json", "status.json", "brief.md"):
+            (home / leaf).unlink(missing_ok=True)
+        if (home / "worktree").is_symlink():
+            (home / "worktree").unlink()
+        if home.is_dir() and not any(home.iterdir()):
+            home.rmdir()
+        print(f"{name}: closed. Worktree kept at {f['path']}" if f.get("kind") != "session" else f"{name}: closed")
+    else:
+        repo = project_of(f)["repo"]
+        wt = Path(f["path"])
+        if wt.exists():
+            r = run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)])
+            if r.returncode:
+                die(f"{name}: could not remove the worktree, nothing else was removed: {r.stderr.strip()}")
+        run(["git", "-C", str(repo), "worktree", "prune"])
+        gone = []
+        if f.get("branch") and not run(["git", "-C", str(repo), "branch", "-D", f["branch"]]).returncode:
+            gone.append(f"branch {f['branch']}")
+        kept = archive(f, home)
+        if (home / "worktree").exists() and not (home / "worktree").is_symlink():
+            die(f"{name}: {home / 'worktree'} is still there; left {home} in place")
+        shutil.rmtree(home, ignore_errors=True)
+        note = f"; kept {' and '.join(kept)} in {home.parent / 'archive' / name}" if kept else ""
+        print(f"{name}: closed, removed worktree{', ' + ', '.join(gone) if gone else ''} and its state{note}")
+    for row in owned_panes(name):
+        if row["session"] == PARK:
+            tmux("kill-pane", "-t", row["id"])
+    for pane in panes:
+        tmux("kill-session", "-t", f"={host_session(name, pane['name'])}")
+    # last: run from inside this feature's own window, killing it ends this process too
+    tmux("kill-window", "-t", f"{SESSION}:{name}")
+
+
+def cmd_clean(yes: bool) -> None:
+    pr_sync(force=True)
+    done = [(f, why) for f in features() if (why := merged_and_clean(f))]
+    if not done:
+        print("nothing to clean: no feature has a merged PR and a clean tree")
+        return
+    for f, why in done:
+        if yes:
+            cmd_done(f["name"], force=True)  # merged and clean already
+        else:
+            print(f"{f['name']:<26} {why}  — grove clean --yes removes its worktree, branch and state")
+
+
+def cmd_doctor() -> None:
+    problems = 0
+
+    def warn(msg: str) -> None:
+        nonlocal problems
+        problems += 1
+        print(f"  ✗ {msg}")
+
+    print("tools")
+    for tool, fix in (("tmux", "brew install tmux"), ("gh", "brew install gh"), ("claude", ""), ("git", "")):
+        if run(["which", tool]).returncode:
+            warn(f"{tool} missing {fix}")
+    for name in project_names():
+        p = project(name)
+        print(f"project {name}  ({p['repo']})")
+        if run(["git", "-C", str(p["repo"]), "rev-parse", "--git-dir"]).returncode:
+            warn("repo is not a git repository")
+        for rel in p["setup"].get("link", []) + p["setup"].get("clone", []) + p["setup"].get("copy", []):
+            if not (p["repo"] / rel).exists():
+                warn(f"{rel} is missing in the main checkout (setup cannot provide it)")
+    live = listening()
+    regs = features()
+    for f in regs:
+        wt = Path(f["path"])
+        print(f["name"])
+        if not wt.exists():
+            warn(f"worktree {wt} is gone — grove done {f['name']}")
+            continue
+        if f.get("kind") == "session":
+            continue
+        try:
+            p = project_of(f)
+        except SystemExit:
+            warn(f"its project '{f.get('project')}' is not registered")
+            continue
+        for rel in p["setup"].get("copy", []) + p["setup"].get("link", []):
+            if not (wt / rel).exists():
+                warn(f"{rel} missing")
+        for rel in p["setup"].get("clone", []):
+            if not (wt / rel).exists():
+                warn(f"{rel} missing")
+            elif (wt / rel).is_symlink():
+                warn(f"{rel} is a symlink, expected a copy: rm it and `cp -Rc` it from the main checkout")
+        for s in services(p):
+            port = ports(f).get(s["name"])
+            lo, hi = (s.get("ports") or [0, 65535])[:2]
+            if port is None:
+                warn(f"no port assigned for {s['name']}")
+            elif not lo <= port <= hi:
+                warn(f"{s['name']} port {port} is outside {lo}-{hi}")
+        for rule in p.get("env", []):
+            path = wt / rule["file"]
+            text = path.read_text() if path.exists() else ""
+            for key, svc in rule.get("port", {}).items():
+                port = ports(f).get(svc)
+                line = next((ln for ln in text.splitlines() if ln.startswith(f"{key}=")), "")
+                if port and line and f"localhost:{port}" not in line:
+                    warn(f"{rule['file']} {key} does not point at {svc} :{port}")
+            for key, value in rule.get("set", {}).items():
+                if f"{key}={fill(value, f)}" not in text:
+                    warn(f"{rule['file']} {key} is not {fill(value, f)}")
+        for (lab_name, value), rule in zip(labels(p, f), p.get("labels", [])):
+            if value in rule.get("warn", []) or value == "none" and rule.get("required"):
+                warn(f"{lab_name} is {value}")
+        mine = set(ports(f).values())
+        for other in regs:
+            if other is not f and set(ports(other).values()) & mine:
+                warn(f"shares a port with {other['name']}")
+        if (mine & live) and not owned_panes(f["name"]):
+            warn("its ports are served by something outside Grove")
+    print(f"\n{problems} problem(s)" if problems else "\nall good")
+
+
+def detect_services(repo: Path) -> list[dict]:
+    """A starter guess for `grove project add`: a JS dev server and/or a Python web app."""
+    found = []
+    for pkg in [repo / "package.json", *sorted(repo.glob("*/package.json"))][:6]:
+        scripts = read_json(pkg, {}).get("scripts", {})
+        if "dev" in scripts:
+            rel = "" if pkg.parent == repo else pkg.parent.name
+            name = "web" if not found else (rel or "web2")
+            found.append({"name": name, "dir": rel, "run": "exec npm run dev -- --port {port}",
+                          "ports": [3001, 3099], "reserved": [3000], "open": "http://localhost:{port}"})
+            break
+    for marker, cmd in (("manage.py", "exec python manage.py runserver {port}"),
+                        ("main.py", "exec python -m uvicorn main:app --reload --port {port}")):
+        for path in [repo / marker, *sorted(repo.glob(f"*/{marker}"))][:6]:
+            if path.exists():
+                rel = "" if path.parent == repo else path.parent.name
+                found.append({"name": "api", "dir": rel, "run": cmd, "ports": [8001, 8099], "reserved": [8000]})
+                break
+        if any(s["name"] == "api" for s in found):
+            break
+    return found
+
+
+def cmd_project(rest: list[str]) -> None:
+    sub = rest[0] if rest else "ls"
+    if sub == "ls":
+        default = read_json(CONFIG, {}).get("defaultProject")
+        for name in project_names():
+            p = project(name)
+            print(f"{'*' if name == default else ' '} {name:<16} {p['repo']}  services: "
+                  f"{', '.join(s['name'] for s in services(p)) or '-'}")
+        if not project_names():
+            print("(no projects — grove project add <repo>)")
+    elif sub == "add":
+        if len(rest) < 2:
+            die("project add <repo> [--name N]")
+        repo = expand(rest[1])
+        if run(["git", "-C", str(repo), "rev-parse", "--git-dir"]).returncode:
+            die(f"{repo} is not a git repository")
+        name = rest[rest.index("--name") + 1] if "--name" in rest else repo.name.lower()
+        if project_conf(name).exists():
+            die(f"project '{name}' exists (grove project show {name})")
+        mine = {"repo": str(repo).replace(str(HOME), "~")}
+        if not (repo / ".grove.json").exists():
+            mine["services"] = detect_services(repo)
+            mine["_help"] = ("Grove project config — see `grove` docs: services, setup, env, labels, checks, agentNotes. "
+                             "Commit a .grove.json to the repo to share it; keys here override it.")
+        write_json(project_conf(name), mine)
+        cfg = read_json(CONFIG, {})
+        if not cfg.get("defaultProject"):
+            cfg["defaultProject"] = name
+            write_json(CONFIG, cfg)
+        print(f"project {name}: {repo} ({'.grove.json' if (repo / '.grove.json').exists() else 'starter config'}) "
+              f"→ edit {project_conf(name)}")
+    elif sub == "default":
+        if len(rest) < 2 or rest[1] not in project_names():
+            die(f"project default <name> (projects: {', '.join(project_names())})")
+        cfg = read_json(CONFIG, {})
+        cfg["defaultProject"] = rest[1]
+        write_json(CONFIG, cfg)
+        print(f"default project: {rest[1]}")
+    elif sub == "show":
+        p = project(rest[1] if len(rest) > 1 else default_project())
+        print(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in p.items()}, indent=2))
+    else:
+        die("project ls | add <repo> [--name N] | default <name> | show [name]")
+
+
+def cmd_statusline() -> None:
+    """Claude Code's status line: in the tmux UI the feature switcher; in the app nothing (the sidebar
+    is the switcher); outside features an optional legacy script."""
+    raw = sys.stdin.read()
+    data = parse_json(raw)
+    cwd = (data.get("workspace") or {}).get("current_dir") or data.get("cwd") or os.getcwd()
+    regs = features()
+    sid = data.get("session_id")
+    here = next((f for f in regs if (f.get("session") == sid if f.get("kind") == "session"
+                                     else cwd == f["path"] or cwd.startswith(f["path"] + "/"))), None)
+    legacy = HOME / ".claude/statusline-feature.sh"
+    if here is not None and ui_mode() == "app":
+        # the app's sidebar is the switcher: only what it doesn't show (and never empty, so Claude
+        # replaces whatever it showed before)
+        model = (data.get("model") or {}).get("display_name") or ""
+        cost = (data.get("cost") or {}).get("total_cost_usd")
+        bits = [model, f"${cost:.2f}" if isinstance(cost, (int, float)) else ""]
+        print("\033[38;5;245m" + (" · ".join(b for b in bits if b) or " ") + "\033[0m")
+        return
+    if here is None or not os.environ.get("TMUX"):
+        if legacy.exists():
+            os.execvp("bash", ["bash", "-c", f"printf '%s' {shlex.quote(raw)} | {shlex.quote(str(legacy))}"])
+        return
+    index = {}
+    for line in tmux("list-windows", "-t", SESSION, "-F", "#I\t#W").stdout.splitlines():
+        i, _, w = line.partition("\t")
+        index[w] = i
+    pal = theme()
+
+    def fg(hexcolour: str) -> str:
+        h = hexcolour.lstrip("#")
+        return "\033[38;2;{};{};{}m".format(*(int(h[i:i + 2], 16) for i in (0, 2, 4)))
+
+    def bg(hexcolour: str) -> str:
+        h = hexcolour.lstrip("#")
+        return "\033[48;2;{};{};{}m".format(*(int(h[i:i + 2], 16) for i in (0, 2, 4)))
+
+    look = {"waiting": ("❗", "needs you", pal["waiting"]), "ready": ("✓", "your turn", pal["ready"]),
+            "working": ("⏳", "working", pal["working"]), "offline": ("·", "offline", "#a8a8a8")}
+    parts = []
+    for f in regs:
+        st = status_of(f).get("state", "offline")
+        glyph, word, colour = look.get(st, look["offline"])
+        num = index.get(f["name"], "?")
+        if f is here:
+            parts.append(f"{bg(pal['name'])}\033[1;30m ▶ {num} {f['name']} \033[0m")
+        else:
+            label = f" {word}" if st in ("waiting", "ready") else ""
+            parts.append(f"{fg(colour)}{num} {glyph} {f['name']}{label}\033[0m")
+    print("  ".join(parts) + f"   {fg('#a8a8a8')}^b n switch · ^b F pick · ^b N new\033[0m")
+
+
+def parse_json(text: str) -> dict:
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
+    except ValueError:
+        return {}
+
+
+def main(argv: list[str]) -> None:
+    cmd, rest = (argv[0], argv[1:]) if argv else ("ls", [])
+    if cmd not in ("statusline", "keepawake", "agent", "serve"):  # the frequent, in-session ones
+        rename_legacy_tmux()
+
+    def need(n: int, usage: str) -> None:
+        if len(rest) < n:
+            die(usage)
+
+    if cmd == "new":
+        cmd_new(rest)
+    elif cmd == "project":
+        cmd_project(rest)
+    elif cmd == "adopt":
+        cmd_adopt(rest)
+    elif cmd == "sessions":
+        cmd_sessions(rest)
+    elif cmd == "go":
+        need(1, "go <name>")
+        f = feature(rest[0])
+        open_window(f)
+        switch_to(f["name"])
+    elif cmd == "ls":
+        cmd_ls()
+    elif cmd == "agent":
+        need(1, "agent <name>")
+        cmd_agent(rest[0])
+    elif cmd == "serve":
+        need(2, "serve <service> <name>")
+        cmd_serve(rest[0], rest[1])
+    elif cmd in ("up", "restart"):
+        need(1, f"{cmd} <name>")
+        cmd_servers(rest[0], up=True)
+    elif cmd == "down":
+        need(1, "down <name>")
+        cmd_servers(rest[0], up=False)
+    elif cmd == "pr":
+        cache = pr_sync(force="--force" in rest)
+        print(f"{len(cache.get('byBranch', {}))} PRs cached")
+    elif cmd == "findings":
+        need(1, "findings <name> [--brief] [--mark]")
+        cmd_findings(rest[0], "--brief" in rest, "--mark" in rest)
+    elif cmd == "clean":
+        cmd_clean("--yes" in rest)
+    elif cmd == "done":
+        need(1, "done <name> [--keep|--force|--check]")
+        cmd_done(rest[0], keep="--keep" in rest, force="--force" in rest, check="--check" in rest)
+    elif cmd == "host":
+        need(1, "host <name>")
+        print(json.dumps(host(feature(rest[0]))))
+    elif cmd == "rename":
+        need(2, "rename <name> <title…>")
+        f = feature(rest[0])
+        f["title"] = " ".join(rest[1:]).strip() or f["name"]
+        save(f)
+        print(f"{f['name']}: titled “{f['title']}”")
+    elif cmd == "ui":
+        cfg = read_json(CONFIG, {})
+        if rest:
+            if rest[0] not in ("app", "tmux"):
+                die("ui app|tmux")
+            cfg["ui"] = rest[0]
+            write_json(CONFIG, cfg)
+        print(f"ui: {cfg.get('ui', 'tmux')}")
+    elif cmd == "theme":
+        t = read_json(THEME, DEFAULT_THEME) if THEME.exists() else DEFAULT_THEME
+        if not rest:
+            print(f"palette: {t.get('palette')}  (choices: {', '.join(t.get('palettes', {}))})")
+        elif rest[0] not in t.get("palettes", {}):
+            die(f"no palette '{rest[0]}' (choices: {', '.join(t.get('palettes', {}))})")
+        else:
+            write_json(THEME, {**t, "palette": rest[0]})
+            apply_theme()
+            for f in features():
+                if has_window(f["name"]):
+                    paint_buttons(f)
+            print(f"palette: {rest[0]} (headers repaint within a few seconds)")
+    elif cmd == "statusline":
+        cmd_statusline()
+    elif cmd == "toggle":
+        need(2, "toggle <name> <panel>")
+        toggle(feature(rest[0]), rest[1])
+    elif cmd == "relayout":
+        need(1, "relayout <name>")
+        f = feature(rest[0])
+        old = f"{SESSION}:{f['name']}"
+        for row in owned_panes(f["name"]):
+            if row["session"] == PARK:
+                tmux("kill-pane", "-t", row["id"])
+        tmux("rename-window", "-t", old, f"{f['name']}-old")
+        for row in owned_panes(f["name"]):
+            tmux("set-option", "-p", "-u", "-t", row["id"], "@grove_owner")
+        open_window(f)
+        tmux("kill-window", "-t", f"{SESSION}:{f['name']}-old")
+        print(f"{f['name']}: window rebuilt")
+    elif cmd == "doctor":
+        cmd_doctor()
+    elif cmd == "migrate":
+        cmd_migrate()
+    elif cmd == "recap":
+        cmd_recap(rest)
+    elif cmd == "retro":
+        need(1, "retro <name>")
+        cmd_retro(rest[0])
+    elif cmd == "send":
+        need(2, "send <name> <text…>")
+        cmd_send(rest[0], " ".join(rest[1:]))
+    elif cmd == "keepawake":
+        cmd_keepawake(rest)
+    elif cmd == "attach":
+        ensure_session()
+        os.execvp("tmux", ["tmux", "attach", "-t", SESSION])
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
