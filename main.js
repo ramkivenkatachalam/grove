@@ -1,5 +1,5 @@
 // Grove: the Electron main process. One window per project. State comes from ~/.grove
-// (written by `fh` and the Claude Code mod); actions go through `fh`; every terminal is a tmux session
+// (written by `grove` and the Claude Code mod); actions go through `grove`; every terminal is a tmux session
 // attached through ptybridge.py, so closing a window or quitting never stops an agent or a server.
 const { app, BrowserWindow, ipcMain, shell, Menu, dialog } = require('electron')
 const path = require('path')
@@ -9,7 +9,7 @@ const { spawn, execFile } = require('child_process')
 
 const HOME = os.homedir()
 const HUB = process.env.GROVE_HUB || path.join(HOME, '.grove')
-const FH = process.env.GROVE_BIN || path.join(HUB, 'bin/fh')
+const BIN = process.env.GROVE_BIN || path.join(HUB, 'bin/grove')
 // a Finder-launched app has a bare PATH: tmux, gh, git and claude live in these
 process.env.PATH = ['/opt/homebrew/bin', '/usr/local/bin', path.join(HOME, '.local/bin'), process.env.PATH]
   .filter(Boolean).join(':')
@@ -74,7 +74,7 @@ function allFeatures() {
       project: f.project || path.basename(path.dirname(dir)),
       title: f.title || f.name,
       status: readJSON(path.join(dir, 'status.json'), { state: 'offline' }),
-      recap: readJSON(path.join(dir, 'recap.json'), null), // fh recap: goal, done, now, next…
+      recap: readJSON(path.join(dir, 'recap.json'), null), // grove recap: goal, done, now, next…
       pr: prs[f.branch] || null,
     }))
     .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.name.localeCompare(b.name))
@@ -119,9 +119,9 @@ function watchHub() {
   setInterval(sendState, 4000) // a backstop for missed events
 }
 
-function fh(args) {
+function grove(args) {
   return new Promise((resolve) => {
-    execFile(FH, args, { env: process.env, timeout: 15 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(BIN, args, { env: process.env, timeout: 15 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
       resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr) })
     })
   })
@@ -176,13 +176,13 @@ function openProject(project) {
     windows.delete(project)
     rememberOpen()
   })
-  if (process.env.FH_SCREENSHOT && windows.size === 1) {
-    // FH_SCREENSHOT_JS runs once in the page first (e.g. to open panels), for visual checks
-    if (process.env.FH_SCREENSHOT_JS) contents.once('did-finish-load', () => contents.executeJavaScript(process.env.FH_SCREENSHOT_JS))
+  if (process.env.GROVE_SCREENSHOT && windows.size === 1) {
+    // GROVE_SCREENSHOT_JS runs once in the page first (e.g. to open panels), for visual checks
+    if (process.env.GROVE_SCREENSHOT_JS) contents.once('did-finish-load', () => contents.executeJavaScript(process.env.GROVE_SCREENSHOT_JS))
     contents.once('did-finish-load', () => setTimeout(async () => {
-      fs.writeFileSync(process.env.FH_SCREENSHOT, (await contents.capturePage()).toPNG())
+      fs.writeFileSync(process.env.GROVE_SCREENSHOT, (await contents.capturePage()).toPNG())
       app.quit()
-    }, Number(process.env.FH_SCREENSHOT_DELAY || 6000)))
+    }, Number(process.env.GROVE_SCREENSHOT_DELAY || 6000)))
   }
   return win
 }
@@ -193,7 +193,7 @@ async function addProject(parent) {
     properties: ['openDirectory'], buttonLabel: 'Add Project',
   })
   if (canceled || !filePaths[0]) return null
-  const result = await fh(['project', 'add', filePaths[0]])
+  const result = await grove(['project', 'add', filePaths[0]])
   if (result.code) {
     dialog.showMessageBox(parent, { type: 'warning', message: 'Could not add the project', detail: (result.stderr || result.stdout).trim() })
     return null
@@ -230,13 +230,13 @@ ipcMain.on('term:close', (_e, id) => {
 // ---- state and actions ----
 const windowOf = (e) => BrowserWindow.fromWebContents(e.sender)
 ipcMain.handle('state', (_e, project) => loadState(project))
-ipcMain.handle('fh', async (_e, args) => {
-  const result = await fh(args)
+ipcMain.handle('grove', async (_e, args) => {
+  const result = await grove(args)
   sendState()
   return result
 })
 ipcMain.handle('host', async (_e, name) => {
-  const result = await fh(['host', name])
+  const result = await grove(['host', name])
   try {
     return JSON.parse(result.stdout)
   } catch {
@@ -272,7 +272,7 @@ ipcMain.handle('doc:write', (_e, kind, name, text) => {
   fs.renameSync(file + '.tmp', file)
   return true
 })
-// the task a feature was started with (fh new -p / a ticket), before or after Claude was handed it
+// the task a feature was started with (grove new -p / a ticket), before or after Claude was handed it
 ipcMain.handle('brief', (_e, name) => {
   const dir = featureDir(name)
   for (const file of dir ? ['brief.md', 'brief.sent.md'] : []) {
@@ -391,7 +391,7 @@ function openRemembered() {
 }
 
 app.whenReady().then(async () => {
-  await fh(['ui', 'app']) // new features get hosted sessions for this app
+  await grove(['ui', 'app']) // new features get hosted sessions for this app
   buildMenu()
   openRemembered()
   watchHub()

@@ -412,7 +412,7 @@ function writeRetro(title, sections) {
 
 const RETRO_LOOK = { 'What went well': '✓', 'What didn’t': '✗', 'What to try next time': '→' }
 
-// the retro: drafted once as the feature wraps up (fh retro), lessons for the next feature with an agent
+// the retro: drafted once as the feature wraps up (grove retro), lessons for the next feature with an agent
 function RetroSection({ f, say }) {
   const [version, setVersion] = useState(0)
   const [text, edit, saved] = useDoc('retro', f.name, version)
@@ -423,9 +423,9 @@ function RetroSection({ f, say }) {
   const draft = async () => {
     if (text.trim() && !(await hub.confirm('Draft the retro again?', 'The current one is kept as retro.prev.md beside it.', 'Draft again'))) return
     setBusy(true)
-    const r = await hub.fh(['retro', f.name])
+    const r = await hub.grove(['retro', f.name])
     setBusy(false)
-    if (r.code) return say((r.stderr || r.stdout).trim().replace(/^fh: /, ''), true)
+    if (r.code) return say((r.stderr || r.stdout).trim().replace(/^grove: /, ''), true)
     setVersion((v) => v + 1)
   }
   const bullets = (h) => (sections[h] || '').split('\n').map((l) => l.replace(/^\s*[-*]\s+/, '').trim()).filter(Boolean)
@@ -475,7 +475,7 @@ function RecapList({ glyph, word, items, colour, empty }) {
   )
 }
 
-// the feature at a glance, written by `fh recap` after Claude's turns (or now, with Refresh)
+// the feature at a glance, written by `grove recap` after Claude's turns (or now, with Refresh)
 function Recap({ f, pal }) {
   const r = f.recap
   const [busy, setBusy] = useState(false)
@@ -489,9 +489,9 @@ function Recap({ f, pal }) {
   const refresh = async () => {
     setBusy(true)
     setError('')
-    const res = await hub.fh(['recap', f.name, '--force'])
+    const res = await hub.grove(['recap', f.name, '--force'])
     setBusy(false)
-    if (res.code) setError((res.stderr || res.stdout).trim().replace(/^fh: /, ''))
+    if (res.code) setError((res.stderr || res.stdout).trim().replace(/^grove: /, ''))
   }
   const list = (v) => (Array.isArray(v) ? v : [])
   return (
@@ -530,9 +530,9 @@ function SummaryTab({ f, repo, pal, say, onNew }) {
     if (choice === 'new') return onNew(text)
     if (sending) return
     setSending(true)
-    const r = await hub.fh(['send', f.name, text])
+    const r = await hub.grove(['send', f.name, text])
     setSending(false)
-    say((r.code ? r.stderr || r.stdout : r.stdout).trim().replace(/^fh: /, ''), Boolean(r.code))
+    say((r.code ? r.stderr || r.stdout : r.stdout).trim().replace(/^grove: /, ''), Boolean(r.code))
   }
   const menu = async (e) => {
     const text = selectionIn(root.current, e.target)
@@ -617,7 +617,7 @@ function App() {
     hub.onState(setState)
   }, [])
   const features = state.features
-  // a feature created anywhere (Claude's new_feature tool, fh new, + New) gets the focus once
+  // a feature created anywhere (Claude's new_feature tool, grove new, + New) gets the focus once
   const startedAt = useRef(Date.now() / 1000)
   const seenFocus = useRef(0)
   useEffect(() => {
@@ -665,16 +665,16 @@ function App() {
   const rename = async (name, title) => {
     setRenaming(null)
     if (!title.trim()) return
-    const r = await hub.fh(['rename', name, ...title.trim().split(/\s+/)])
+    const r = await hub.grove(['rename', name, ...title.trim().split(/\s+/)])
     if (r.code) say(r.stderr || r.stdout, true)
   }
   const create = async (name, task) => {
     setNewOpen(false)
     setCreating(name)
-    const r = await hub.fh(['new', name, ...(state.project ? ['--project', state.project] : []), ...(task ? ['-p', task] : [])])
+    const r = await hub.grove(['new', name, ...(state.project ? ['--project', state.project] : []), ...(task ? ['-p', task] : [])])
     setCreating(null)
     if (r.code) return say((r.stderr || r.stdout).trim(), true)
-    // fh new turns a typed phrase into a name ("Main panel tabs" → main-panel-tabs) and says it first: "<name>: <worktree> [<branch>]"
+    // grove new turns a typed phrase into a name ("Main panel tabs" → main-panel-tabs) and says it first: "<name>: <worktree> [<branch>]"
     setCurrent(/^([a-z0-9][a-z0-9._-]*): \S+ \[/m.exec(r.stdout)?.[1] || name.toLowerCase())
     say(r.stdout.trim())
   }
@@ -682,7 +682,7 @@ function App() {
     const choice = await hub.rowMenu({ name: feat.name, prUrl: feat.pr?.url, links: feat.links })
     if (choice === 'rename') setRenaming(feat.name)
     if (choice === 'restart') {
-      const r = await hub.fh(['restart', feat.name])
+      const r = await hub.grove(['restart', feat.name])
       say((r.stdout || r.stderr).trim(), Boolean(r.code))
     }
     if (choice?.startsWith('open:')) hub.open(choice.slice(5))
@@ -690,7 +690,7 @@ function App() {
     if (choice === 'reveal') hub.reveal(feat.path)
     if (choice === 'done') {
       // a merged, committed feature just goes; anything that might lose work asks first
-      const c = await hub.fh(['done', feat.name, '--check'])
+      const c = await hub.grove(['done', feat.name, '--check'])
       let why = []
       try { why = JSON.parse(c.stdout).reasons || [] } catch { why = [(c.stderr || 'could not check it').trim()] }
       const args = ['done', feat.name]
@@ -701,7 +701,7 @@ function App() {
         if (pick === 2) return
         args.push(pick === 0 ? '--force' : '--keep')
       }
-      const r = await hub.fh(args)
+      const r = await hub.grove(args)
       say((r.stdout || r.stderr).trim(), Boolean(r.code))
       setHosted((h) => ({ ...h, [feat.name]: undefined }))
     }
@@ -717,7 +717,7 @@ function App() {
       if (action === 'find') filterRef.current?.focus()
       if (action === 'rename' && f) setRenaming(f.name)
       if (action === 'restart' && f) {
-        const r = await hub.fh(['restart', f.name])
+        const r = await hub.grove(['restart', f.name])
         say((r.stdout || r.stderr).trim(), Boolean(r.code))
       }
       if (action.startsWith('toggle:')) toggle(action.slice(7))

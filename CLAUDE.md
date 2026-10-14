@@ -7,7 +7,7 @@ one git worktree per feature. README.md is the user-facing description; this fil
 
 | Piece | Source | Live location (symlinked to the source) |
 |---|---|---|
-| CLI `fh` / `grove` (Python 3, **stdlib only**) | `cli/fh` | `~/.grove/bin/fh`, `~/.local/bin/{fh,grove}` |
+| CLI `grove` (Python 3, **stdlib only**; `fh` is its old name, kept as an alias) | `cli/grove` | `~/.grove/bin/{grove,fh}`, `~/.local/bin/{grove,fh}` |
 | Claude Code mod (function hooks, TypeScript) | `mod/` | `~/.grove/mod`, loaded via `CLAUDE_CODE_PLUGIN_DIRS` in `~/.claude/settings.json` |
 | Mac app (Electron 44 + React 19 + xterm.js 6) | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | `/Applications/Grove.app` (a built copy: rebuild to update) |
 | tmux front end | `tmux/grove.tmux.conf` | `~/.grove/tmux.conf`, sourced from `~/.tmux.conf` |
@@ -15,19 +15,19 @@ one git worktree per feature. README.md is the user-facing description; this fil
 Runtime state, never in git: `~/.grove/` — one folder per project, `projects/<p>/project.json`
 (per-project config; Numos's is private there), and in it one folder per feature, `projects/<p>/<f>/`
 with `feature.json` (registry), `status.json` (written by the mod), `brief.md` and `worktree/` (the git
-worktree, or a link to one made before this layout). `fh done` deletes a feature's folder, keeping its
+worktree, or a link to one made before this layout). `grove done` deletes a feature's folder, keeping its
 notes and retro in `projects/<p>/archive/<f>/`. At the top: `prs.json`, `feedback.json`, `theme.json`,
 `config.json` (`ui: app|tmux`, `defaultProject`), `focus.json`. Feature names are unique across projects
 (tmux sessions are named by them). The app's file watcher ignores everything under `worktree/`.
 
 How they connect: the app only draws (reads state files, attaches terminals); the CLI does the work; the
-mod reports from inside each Claude session; tmux hosts every process (`fh_<feature>_<pane>` sessions).
+mod reports from inside each Claude session; tmux hosts every process (`grove_<feature>_<pane>` sessions).
 
 ## Working rules
 
 - **Edit the source here** — the live locations are symlinks, so CLI and mod edits are live immediately.
   Running Claude sessions do *not* hot-reload the mod: restart them (`claude --continue`) to pick changes up.
-- **CLI**: stdlib only, no third-party imports. `python3 -m py_compile cli/fh` after edits. Every command
+- **CLI**: stdlib only, no third-party imports. `python3 -m py_compile cli/grove` after edits. Every command
   must stay safe to re-run (host, adopt, provision are idempotent).
 - **Mod** (`mod/hooks/register.tsx`), the function-hooks API:
   - A helper that takes `$` must be a top-level function declaration (the validator rejects closures).
@@ -37,11 +37,12 @@ mod reports from inside each Claude session; tmux hosts every process (`fh_<feat
     `claude -p "ok"` once to refresh it, then retest.
 - **App**: no native node modules (terminals go through `ptybridge.py`). After renderer edits: `npm run build`.
   Check visuals with a screenshot, not by guessing:
-  `GROVE_PROJECT=<name> FH_SCREENSHOT=/tmp/g.png npx electron .` (optionally `FH_SCREENSHOT_JS='…'` to set
+  `GROVE_PROJECT=<name> GROVE_SCREENSHOT=/tmp/g.png npx electron .` (optionally `GROVE_SCREENSHOT_JS='…'` to set
   localStorage first, `GROVE_HUB=…` to use a throwaway hub). Then `npm run install-app` (quit Grove first).
 - **Test generically**: anything touching projects, worktrees or services gets an end-to-end run against a
-  throwaway project with `GROVE_HUB=/tmp/x/hub GROVE_BIN=$PWD/cli/fh TMUX_TMPDIR=/tmp/x/tm` (keep the
-  TMUX_TMPDIR path short: tmux socket paths have a length limit). Never test against the user's live hub.
+  throwaway project with `env -u TMUX GROVE_HUB=/tmp/x/hub GROVE_BIN=$PWD/cli/grove TMUX_TMPDIR=/tmp/x/tm`
+  (keep the TMUX_TMPDIR path short: tmux socket paths have a length limit). Never test against the user's
+  live hub, and unset `TMUX` (see the first gotcha).
 - **Accessibility**: every state carries a word, not just a colour; text ≥ 4.5:1 on its background;
   every click has a key.
 - **Commits**: this checkout commits as `ramkivenkatachalam <ramki@utexas.edu>`; no mention of Claude in
@@ -56,15 +57,17 @@ mod reports from inside each Claude session; tmux hosts every process (`fh_<feat
   and beats `TMUX_TMPDIR`: a test that only sets `TMUX_TMPDIR` still drives the live server, and its
   `kill-server` stops every agent and service (it happened, twice). Use `env -u TMUX` / `unset TMUX` with
   `TMUX_TMPDIR`, or `tmux -S <socket>` on every call. The mod blocks the risky forms (`liveTmuxRisk`).
-
+- The CLI was called `fh` (feature hub) before Grove. Its tmux sessions (`fh_*`, `fh-park`) and options
+  (`@fh_*`) are renamed to `grove_*` by any `grove` command; Claude sessions started before the rename
+  keep writing `@fh_*` header options until they restart.
 - macOS `sleep infinity` exits at once — use `sleep 2147483647`.
 - tmux `set-option -t` takes a pane target: write `=<session>:` (with the colon) for a session.
 - zsh aborts a whole command line when a glob matches nothing (`rm -f 7-*.svg`): guard or avoid globs.
-- Claude Code keeps showing its last status line until it re-runs the command; `fh statusline` therefore
+- Claude Code keeps showing its last status line until it re-runs the command; `grove statusline` therefore
   never prints an empty line in app mode.
 - A Claude conversation can only be resumed from the folder it started in (transcripts are stored per
   folder under `~/.claude/projects/`), so session rows keep their original path.
-- `fh adopt` rewrites a worktree's env files to its new ports; services start stopped.
+- `grove adopt` rewrites a worktree's env files to its new ports; services start stopped.
 - Offscreen Electron `capturePage` can return the previous frame: settle (two rAFs + a beat) and capture twice.
 
 ## Open items

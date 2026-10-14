@@ -5,7 +5,7 @@ contextBridge.exposeInMainWorld('hub', {
   state: (project) => ipcRenderer.invoke('state', project),
   onState: (fn) => ipcRenderer.on('state', (_e, state) => fn(state)),
   onMenu: (fn) => ipcRenderer.on('menu', (_e, action) => fn(action)),
-  fh: (args) => ipcRenderer.invoke('fh', args),
+  grove: (args) => ipcRenderer.invoke('grove', args),
   host: (name) => ipcRenderer.invoke('host', name),
   open: (url) => ipcRenderer.send('open', url),
   reveal: (dir) => ipcRenderer.send('reveal', dir),
