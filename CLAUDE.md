@@ -52,6 +52,11 @@ mod reports from inside each Claude session; tmux hosts every process (`fh_<feat
 
 ## Gotchas learned the hard way
 
+- **Never touch the live tmux server from a test.** Agents run inside Grove's tmux panes, where `$TMUX` is set
+  and beats `TMUX_TMPDIR`: a test that only sets `TMUX_TMPDIR` still drives the live server, and its
+  `kill-server` stops every agent and service (it happened, twice). Use `env -u TMUX` / `unset TMUX` with
+  `TMUX_TMPDIR`, or `tmux -S <socket>` on every call. The mod blocks the risky forms (`liveTmuxRisk`).
+
 - macOS `sleep infinity` exits at once — use `sleep 2147483647`.
 - tmux `set-option -t` takes a pane target: write `=<session>:` (with the colon) for a session.
 - zsh aborts a whole command line when a glob matches nothing (`rm -f 7-*.svg`): guard or avoid globs.

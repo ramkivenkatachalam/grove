@@ -226,3 +226,27 @@ test('a finished turn asks fh to refresh the recap', async ($, on) => {
   expect(fake.status().state).toBe('ready')
   expect(fake.commands).toContainEqual([`${HUB}/bin/fh`, 'recap', 'flux', '--bg'])
 })
+
+test('tmux commands that would reach the live server are blocked', async ($, on) => {
+  host(on)
+  let ran = 0
+  on('tool.call', { tool: 'Bash' }, () => {
+    ran += 1
+
+    return { result: 'ok' }
+  })
+  await $.session.start({ cwd: WT, surface: null, isInteractive: true })
+  const bash = (command: string) => $.tool.call({ tool: 'Bash', command } as never)
+
+  // the 2026-10-14 accident: TMUX_TMPDIR without unsetting TMUX, then kill-server
+  const blocked = await bash('export T=/tmp/gr && mkdir -p $T/tm && export TMUX_TMPDIR=$T/tm && tmux new-session -d -s x && tmux ls; tmux kill-server')
+  expect(JSON.stringify(blocked)).toContain('live server')
+  expect(JSON.stringify(await bash('tmux kill-server'))).toContain('kill-server')
+  expect(ran).toBe(0)
+
+  await bash('env -u TMUX TMUX_TMPDIR=/tmp/x/tm tmux new-session -d -s t && unset TMUX && TMUX_TMPDIR=/tmp/x/tm tmux kill-server')
+  await bash('tmux -S /tmp/x/sock new-session -d -s t; tmux -S /tmp/x/sock kill-server')
+  await bash('tmux ls; tmux capture-pane -p -S -20 -t fh_flux_claude')
+  await bash('git status')
+  expect(ran).toBe(4)
+})

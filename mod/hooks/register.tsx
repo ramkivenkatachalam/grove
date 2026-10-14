@@ -479,6 +479,28 @@ async function setState($: EngineInterface, state: FeatureState, message = '') {
   await refresh($)
 }
 
+// Inside a Grove pane $TMUX is set, and it beats TMUX_TMPDIR: a test that points TMUX_TMPDIR at a temp folder
+// still drives the live server that hosts every agent, and its `kill-server` stops them all. A tmux call is
+// isolated only with its own socket (`tmux -S path` / `-L name`), or with TMUX unset and TMUX_TMPDIR set.
+function liveTmuxRisk(command: string): string | null {
+  const calls = command.split(/[;&|\n]+/).filter(part => /(^|[\s(`$])tmux(\s|$)/.test(part))
+  const shared = calls.filter(part => !/\btmux\s+(?:-\w+\s+\S+\s+)*-[SL]\s*\S/.test(part))
+  if (shared.length === 0) {
+    return null
+  }
+  const unset = /\bunset\s+(?:\w+\s+)*TMUX\b|\benv\s+(?:-\S+\s+)*-u\s*TMUX\b|(^|\s)TMUX=(\s|$)/.test(command)
+  const tmpdir = /\bTMUX_TMPDIR=/.test(command)
+  const how = 'give the test its own server: `tmux -S /tmp/x/sock …` on every call, or `unset TMUX` before setting TMUX_TMPDIR'
+  if (tmpdir && !unset) {
+    return `Blocked: $TMUX is set in this pane and overrides TMUX_TMPDIR, so these tmux commands would hit the live server that hosts every Grove agent. To test, ${how}.`
+  }
+  if (shared.some(part => /\bkill-server\b/.test(part)) && !(tmpdir && unset)) {
+    return `Blocked: tmux kill-server here would stop the live server and every Grove agent and service in it. To test, ${how}.`
+  }
+
+  return null
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('HOME')) ?? ''
@@ -602,6 +624,13 @@ export const register: Register = on => {
     await refresh($)
 
     return { result: `${made.stdout.trim()}\nThe new feature's Claude session has started with the task and your handover. It shows in the Feature Hub sidebar.` }
+  })
+
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const command = (e as unknown as { command?: unknown }).command
+    const risk = typeof command === 'string' ? liveTmuxRisk(command) : null
+
+    return risk ? { deny: risk } : next(e)
   })
 
   on('tool.call', async ($, e, next) => {
