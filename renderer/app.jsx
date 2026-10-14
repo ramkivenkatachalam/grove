@@ -159,7 +159,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
       {newOpen && (
         <form className="newcard" onSubmit={(e) => { e.preventDefault(); create() }} onKeyDown={(e) => e.key === 'Escape' && setNewOpen(false)}>
           <label htmlFor="newname">New feature</label>
-          <input id="newname" autoFocus placeholder="name or NUM-1234" value={newName} onChange={(e) => setNewName(e.target.value)} />
+          <input id="newname" autoFocus placeholder="name or TICKET-123" value={newName} onChange={(e) => setNewName(e.target.value)} />
           <textarea aria-label="Task for Claude (optional)" placeholder="task for Claude (optional) · ⌘↩ creates" rows={task.includes('\n') ? 4 : 2} value={task}
             onChange={(e) => setTask(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); create() } }} />
           <div className="actions">
@@ -674,7 +674,8 @@ function App() {
     const r = await hub.fh(['new', name, ...(state.project ? ['--project', state.project] : []), ...(task ? ['-p', task] : [])])
     setCreating(null)
     if (r.code) return say((r.stderr || r.stdout).trim(), true)
-    setCurrent(name.toLowerCase())
+    // fh new turns a typed phrase into a name ("Main panel tabs" → main-panel-tabs) and says it first: "<name>: <worktree> [<branch>]"
+    setCurrent(/^([a-z0-9][a-z0-9._-]*): \S+ \[/m.exec(r.stdout)?.[1] || name.toLowerCase())
     say(r.stdout.trim())
   }
   const rowMenu = async (feat) => {

@@ -4,7 +4,8 @@ per feature, for any project described by a project config (see `fh project`).
 
   fh new <name|TICKET-123> [--project P] [--title T] [--parent NAME] [--base REF] [-p PROMPT]
                          worktree on <you>/<name>, its own ports, env rewritten, deps prepared,
-                         servers up, Claude briefed (ticket / prompt)
+                         servers up, Claude briefed (ticket / prompt). A name typed as words
+                         becomes a slug ("Main panel tabs" → main-panel-tabs) and the words its title
   fh adopt <worktree>…   register existing worktrees as features (services start stopped)
   fh sessions [--hours H]          recent Claude conversations in the main checkout, not yet in Grove
   fh adopt --session <id>…         bring those conversations into Grove (they resume there)
@@ -803,6 +804,17 @@ def cmd_migrate() -> None:
     print("Restart running Claude sessions so the mod reports to the new place.")
 
 
+def slug(text: str) -> str:
+    """A feature name from whatever was typed: lowercase, words joined by -, at most 40 characters."""
+    words = re.sub(r"[^a-z0-9._]+", " ", text.lower()).split()
+    name = ""
+    for w in words:
+        if len(name) + len(w) + (1 if name else 0) > 40:
+            break
+        name = f"{name}-{w}" if name else w
+    return (name or "-".join(words)[:40]).strip("._-")
+
+
 def cmd_new(args: list[str]) -> None:
     prompt = base = title = parent = proj = None
     rest = []
@@ -825,11 +837,13 @@ def cmd_new(args: list[str]) -> None:
     if parent and not proj and registered(parent):
         proj = feature(parent).get("project")
     p = project(proj or project_here() or default_project())
-    arg = rest[0]
+    arg = " ".join(rest).strip()  # `fh new main panel tabs` works unquoted too
     ticket = arg.upper() if TICKET.match(arg) else None
-    name = arg.lower()
-    if not re.match(r"^[a-z0-9][a-z0-9._-]{0,40}$", name):
-        die("name must be lowercase letters, digits, . _ -")
+    name = slug(arg)
+    if not name:
+        die("give the feature a name with some letters or digits")
+    if name != arg.lower() and not title:
+        title = arg  # typed as words: keep them as the title, the slug names the folder, branch and tmux session
     if registered(name):
         die(f"feature '{name}' exists")
     repo = p["repo"]
