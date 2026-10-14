@@ -80,6 +80,11 @@ grove new csv-export                 # in or outside the repo; --project picks o
 The config is the repo's own **`.grove.json`** (commit it to share it with your team) merged under
 **`~/.grove/projects/<name>/project.json`** (yours; at least `{"repo": "~/code/my-repo"}`).
 
+Without a `.grove.json`, the starter config is a guess from the repo: a `dev` script in a
+`package.json` becomes a web service, a `main.py` or `manage.py` an API; Python envs (`.venv`, `venv`)
+are linked into each worktree, `node_modules` cloned, untracked `.env*` files copied, and the base
+branch follows `origin/HEAD`. Check it with `grove project show <name>`.
+
 | Key | What it does |
 |---|---|
 | `services` | Dev servers, each `{name, dir, run, ports: [lo, hi], reserved, key, hint, open}`. Every feature gets its own port per service; each service is a panel |
@@ -92,6 +97,40 @@ The config is the repo's own **`.grove.json`** (commit it to share it with your 
 See [`examples/nextjs-fastapi.grove.json`](examples/nextjs-fastapi.grove.json).
 
 ## Bringing in work that already exists
+
+In the app: **Add project** (⌘⇧O) and choose the repo — its main checkout or any of its worktrees.
+Grove registers it and shows what is already in flight on it:
+
+- **Worktrees** of the repo that Grove isn't running, newest first, each with what makes it worth
+  bringing in: uncommitted changes, commits ahead of the base branch, its latest Claude conversation.
+  Ones with nothing new for three weeks start unticked.
+- **Claude conversations** from the main checkout in the last 72 hours (e.g. an iTerm tab).
+- **How Grove will run them**: the services, ports and setup it guessed (or read from `.grove.json`),
+  with a link to fix `project.json` first.
+
+Tick what you want and **Bring in** (⌘↩). Each worktree becomes a feature with its own ports and Claude
+session, named after its PR or its Claude conversation; your code and branch stay as they are. Each
+conversation moves under **Sessions** and resumes with its full history once you `/exit` the old copy.
+
+If something can't come in (a port range that's full, a setup step that fails), the rest still does,
+so you can get going. The sidebar then says "1 couldn't come in · **Fix with Claude**". That shows each
+error and the brief Grove wrote for Claude: what failed, the exact error, the command to retry, where
+the config lives, and what not to touch. Edit it if you like; **Start fixing** opens a **Fix import**
+session under Sessions that works through it, with Claude Code's usual permission prompts. Each item
+drops off the list once it is in Grove. (`grove fix-import --draft` prints the same brief.)
+
+Later, when a worktree or conversation shows up outside Grove (made in a terminal out of habit), the
+sidebar says so ("2 in progress outside Grove · Review"); **Project › Bring In Existing Work…** (⌘⇧I)
+opens the same review. What you leave unticked stops being mentioned.
+
+From a terminal, the same thing:
+
+```sh
+grove import ~/code/my-repo          # registers it if new; lists what is not in Grove yet (--json for tools)
+grove import --project my-repo --yes # brings in all of it
+```
+
+Or one at a time:
 
 | You have | Command | What happens |
 |---|---|---|
@@ -107,7 +146,8 @@ to start a second Claude on a worktree that already has one.
 |---|---|
 | `grove ls` | Features, ports, labels, PR/CI, state, recap → next |
 | `grove new <name\|TICKET> [-p task]` | A new feature: worktree, ports, env, services, a briefed Claude |
-| `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations (above) |
+| `grove import [<repo>] [--yes]` | Register a repo and bring in its worktrees and recent conversations (above) |
+| `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations one at a time (above) |
 | `grove up\|down\|restart <name>` | Start, stop or restart a feature's services |
 | `grove rename <name> <title>` | The title shown in Grove |
 | `grove done <name> [--keep\|--force]` · `grove clean [--yes]` | Close a feature: removes its worktree, branch and state (notes and retro go to the project's `archive/`); stops if it has uncommitted or unmerged work unless `--force`, `--keep` keeps worktree and branch · close every merged, clean one |
@@ -122,13 +162,29 @@ to start a second Claude on a worktree that already has one.
 
 ## Install
 
+You need a Mac with Homebrew and Claude Code (signed in). Then, in a terminal:
+
 ```sh
-./install.sh                 # links cli/, mod/ and tmux/ into ~/.grove
-npm install
-npm run install-app          # builds Grove.app into /Applications
+gh repo clone ramkivenkatachalam/grove ~/grove && ~/grove/install.sh --app ~/code/my-repo
 ```
 
-Then add the settings lines `install.sh` prints, so every Claude session loads the mod.
+(`git clone` works too, if you have the repo URL.) Grove is built on your Mac rather than downloaded,
+so macOS opens it without a security prompt. Then open **Grove** from Applications.
+
+`install.sh`:
+
+1. checks for `git`, `tmux`, `gh`, `claude` and `python3` (and `node` with `--app`), and offers to
+   `brew install` the missing ones (`--yes` installs without asking)
+2. links `cli/`, `mod/` and `tmux/` into `~/.grove` and puts `grove` on your PATH (`~/.local/bin`)
+3. has every Claude Code session load the mod: it adds `env.CLAUDE_CODE_PLUGIN_DIRS` (and a status
+   line, if you have none) to `~/.claude/settings.json`, keeping a backup
+4. with `--app`, builds Grove.app into `/Applications` (quitting and reopening Grove if it is running;
+   agents and servers keep running)
+5. for each repo you name, runs `grove import` as a dry run (below)
+
+To update: `cd ~/grove && git pull && ./install.sh --app`.
+
+It is safe to re-run. Then restart running Claude sessions so they load the mod, and run `grove doctor`.
 
 ## Develop
 
@@ -139,8 +195,10 @@ Then add the settings lines `install.sh` prints, so every Claude session loads t
 | Regenerate the icon from `build/icon.svg` | `npm run icon` |
 | Screenshot the app (visual checks) | `GROVE_SCREENSHOT=/tmp/grove.png npx electron .` |
 | Validate / test the mod | `claude plugin validate mod && claude plugin test mod` |
+| Test onboarding end to end (fake home, sample repo; touches nothing real) | `scripts/try-onboarding.sh check` |
+| Click through onboarding in the app, as a new user | `scripts/try-onboarding.sh app` (`--added`: the review sheet; `--imported`; `--demo`: with Claude conversations), then `… clean` |
 
 ## Keys
 
-⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
+⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘⇧I bring in existing work · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
 ⌘⇧R restart servers · right-click a feature for more · ⌥-drag selects text inside a terminal.

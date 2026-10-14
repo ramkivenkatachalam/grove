@@ -111,7 +111,7 @@ function TerminalView({ termKey, session, focus }) {
 }
 
 // ---------- sidebar ----------
-function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, filterRef }) {
+function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, filterRef, waitingOutside, onReview, failedCount, onFix }) {
   const [filter, setFilter] = useState('')
   const [draft, setDraft] = useState('')
   const [newName, setNewName] = useState('')
@@ -191,7 +191,8 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
               </li>
             )
           }
-          const where = f.kind === 'session'
+          const where = f.helper === 'import' ? '◷ bringing in what failed'
+            : f.kind === 'session'
             ? `◷ ${placeOf(f.path, repo)} · ⎇ ${f.branch || '?'}`
             : null
           return (
@@ -212,6 +213,21 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
           )
         })}
       </ul>
+      {failedCount > 0 && (() => {
+        // once a Fix import session exists, the note leads to it instead of starting another
+        const fixer = features.find((x) => x.helper === 'import')
+        return (
+          <button type="button" className="nudge failed" onClick={() => (fixer ? onPick(fixer.name) : onFix())}
+            title={fixer ? 'Open the Fix import session' : 'What could not be brought in, and a Claude session briefed to fix it'}>
+            <span aria-hidden="true">⚠</span> {failedCount} couldn't come in <b>{fixer ? 'Claude is on it' : 'Fix with Claude'}</b>
+          </button>
+        )
+      })()}
+      {waitingOutside > 0 && (
+        <button type="button" className="nudge" onClick={onReview} title="Worktrees and Claude conversations of this repo that Grove is not running yet (⌘⇧I)">
+          <span aria-hidden="true">↧</span> {waitingOutside} in progress outside Grove <b>Review</b>
+        </button>
+      )}
       <div className="side-foot">⌘N new · ⌘E rename · ⌘1–9 switch</div>
     </nav>
   )
@@ -247,7 +263,7 @@ function Header({ f, pal, panels, openList, onToggle, repo }) {
         </span>
         <span className="grow" />
         <span className="facts">
-          {f.kind === 'session' ? <span>{placeOf(f.path, repo)} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
+          {f.helper === 'import' ? <span>helper · brings in what could not come in</span> : f.kind === 'session' ? <span>{placeOf(f.path, repo)} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
           {ci && <span style={{ color: ci[0] === 'ready' ? pal.ready : ci[0] }}>{ci[1]}</span>}
           {pr && pr.state !== 'OPEN' && <span>{pr.state.toLowerCase()}</span>}
           {pr?.findings > 0 && <span style={{ color: pal.accent }}>{pr.findings} finding{pr.findings > 1 ? 's' : ''}</span>}
@@ -594,6 +610,272 @@ function SummaryTab({ f, repo, pal, say, onNew }) {
 }
 
 // ---------- app ----------
+// ---------- bringing in work that is already in flight (grove import) ----------
+const STALE_DAYS = 21
+const keyOf = (item) => item.path || item.id
+const home = (dir) => dir.replace(/^\/Users\/[^/]+/, '~')
+const humanize = (branch) => {
+  const tail = branch.split('/').pop().replace(/[-_]+/g, ' ').trim()
+  return tail.charAt(0).toUpperCase() + tail.slice(1)
+}
+// quiet for weeks with nothing uncommitted: likely finished or abandoned (old branches are often
+// still "ahead" after a squash merge), so listed but not ticked
+const isStale = (t) => !t.dirty && (Date.now() / 1000 - t.at) > STALE_DAYS * 86400
+// a conversation is likely still going if it has a title and moved in the last day
+const isLive = (c) => Boolean(c.title) && (Date.now() / 1000 - c.at) < 86400
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+const failedKeys = (scan) => new Set((scan?.failures || []).map(keyOf))
+const worthIt = (item) => (item.path ? !isStale(item) : isLive(item))
+const outside = (scan, dismissed) => scan && !scan.error
+  ? [...scan.worktrees, ...scan.sessions].filter((item) => !dismissed.includes(keyOf(item)) && worthIt(item) && !failedKeys(scan).has(keyOf(item)))
+  : []
+
+function SetupSummary({ config, project }) {
+  const svc = config.services
+  const st = config.setup
+  const lines = [
+    ...(st.link?.length ? [['Linked from the main checkout', st.link.join(', ')]] : []),
+    ...(st.clone?.length ? [['Copied in (copy-on-write, fast)', st.clone.join(', ')]] : []),
+    ...(st.copy?.length ? [['Copied once', st.copy.join(', ')]] : []),
+    ...(st.run?.length ? [['Then runs', st.run.join(' · ')]] : []),
+  ]
+  return (
+    <details className="setup">
+      <summary>
+        <b>How Grove will run them</b>
+        <span>{svc.length ? `${svc.map((x) => x.name).join(' and ')}, each on its own port` : 'a Claude session and a shell (no dev servers found)'}
+          {' · '}{{ '.grove.json': "from the repo's .grove.json", 'project.json': 'from your project.json', starter: 'guessed from the repo' }[config.source]}</span>
+      </summary>
+      <dl className="facts-list">
+        {svc.map((x) => (
+          <div key={x.name}><dt>{x.name}</dt><dd><code>{x.dir || '.'}</code> · <code>{x.run.replace(/^exec /, '')}</code> · ports {x.ports[0]}–{x.ports[1]}, {x.free} free</dd></div>
+        ))}
+        {lines.map(([what, value]) => <div key={what}><dt>{what}</dt><dd><code>{value}</code></dd></div>)}
+      </dl>
+      <p className="hint">
+        {config.source === 'starter' ? 'Wrong guess? Fix it in ' : 'Your own changes go in '}
+        <a role="link" tabIndex={0} onClick={() => hub.openConfig(project)} onKeyDown={(e) => e.key === 'Enter' && hub.openConfig(project)}>project.json</a>
+        {' '}before bringing work in; it applies to every feature from then on.
+      </p>
+    </details>
+  )
+}
+
+function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
+  const items = [...scan.worktrees, ...scan.sessions]
+  const [picked, setPicked] = useState(() => new Set(items
+    .filter((item) => !dismissed.includes(keyOf(item)) && worthIt(item)).map(keyOf)))
+  const [progress, setProgress] = useState({}) // key -> 'busy' | 'done' | error text
+  const [running, setRunning] = useState(false)
+  const first = useRef(null)
+  useEffect(() => { first.current?.focus() }, [])
+  const flip = (key) => setPicked((all) => {
+    const next = new Set(all)
+    next.has(key) ? next.delete(key) : next.add(key)
+    return next
+  })
+  // a retry after a partial failure leaves out what already came in
+  const trees = scan.worktrees.filter((t) => picked.has(t.path) && progress[t.path] !== 'done')
+  const chats = scan.sessions.filter((c) => picked.has(c.id) && progress[c.id] !== 'done')
+  const count = trees.length + chats.length
+  // a service with fewer free ports than worktrees ticked: the rest would fail, so say so up front
+  const short = scan.config.services.filter((x) => x.free < trees.length)
+
+  const bringIn = async () => {
+    if (!count || running) return
+    setRunning(true)
+    const made = []
+    const failed = [] // what could not come in, with the error, for the Fix import brief
+    const step = async (item, args, pattern) => {
+      const key = keyOf(item)
+      setProgress((p) => ({ ...p, [key]: 'busy' }))
+      const r = await hub.grove(args)
+      const name = pattern.exec(r.stdout)?.[1]
+      const error = (r.stderr || r.stdout).trim() || 'failed'
+      setProgress((p) => ({ ...p, [key]: name && !r.code ? 'done' : error }))
+      if (name && !r.code) made.push(name)
+      else failed.push({ ...(item.path ? { path: item.path, branch: item.branch } : { id: item.id }), title: item.conversation?.title || item.title || '', error })
+    }
+    for (const t of trees) await step(t, ['adopt', t.path, '--project', scan.project], /^([a-z0-9][a-z0-9._-]*): adopted /m)
+    for (const c of chats) await step(c, ['adopt', '--session', c.id], /^(s-[0-9a-f]{8}): /m)
+    setRunning(false)
+    // whatever came in is ready to use; what didn't is kept for Fix with Claude, not left on screen
+    onDone(made, { trees: trees.length - failed.filter((x) => x.path).length, chats: chats.length - failed.filter((x) => x.id).length },
+      items.map(keyOf).filter((k) => !picked.has(k)), failed)
+  }
+
+  const status = (key) => {
+    const st = progress[key]
+    if (!st) return null
+    if (st === 'busy') return <span className="tag busy">bringing in…</span>
+    if (st === 'done') return <span className="tag ok">✓ in Grove</span>
+    return <span className="tag bad" title={st}>✗ {st.split('\n')[0].slice(0, 80)}</span>
+  }
+  const row = (item, i, body) => (
+    <li key={keyOf(item)}>
+      <label className={`pick ${picked.has(keyOf(item)) ? 'on' : ''}`}>
+        <input type="checkbox" ref={i === 0 ? first : undefined} checked={picked.has(keyOf(item))} disabled={running || progress[keyOf(item)] === 'done'}
+          onChange={() => flip(keyOf(item))} />
+        <span className="pick-text">{body}</span>
+        {status(keyOf(item))}
+      </label>
+    </li>
+  )
+
+  return (
+    <div className="sheet-back" onMouseDown={(e) => e.target === e.currentTarget && !running && onClose(items.map(keyOf))}>
+      <section className="sheet" role="dialog" aria-modal="true" aria-labelledby="import-title"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && !running) onClose(items.map(keyOf))
+          if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); bringIn() }
+        }}>
+        <h1 id="import-title">Bring your work into Grove</h1>
+        <p className="sheet-sub">
+          {justAdded ? <>Added <b>{scan.project}</b>. </> : null}
+          {items.length ? `Grove found ${[scan.worktrees.length && plural(scan.worktrees.length, 'worktree'), scan.sessions.length && plural(scan.sessions.length, 'Claude conversation')].filter(Boolean).join(' and ')} in progress in ` : 'Everything in '}
+          <code>{home(scan.repo)}</code>{items.length ? '.' : ' is already in Grove.'}
+        </p>
+
+        {scan.worktrees.length > 0 && (
+          <>
+            <h2>Worktrees <span>each becomes a feature with its own ports and Claude session; your code and branch stay as they are</span></h2>
+            <ul className="picks">
+              {scan.worktrees.map((t, i) => row(t, i, (
+                <>
+                  <span className="pick-title">{t.conversation?.title || humanize(t.branch)}</span>
+                  <span className="pick-sub">⎇ {t.branch} · {home(t.path)}</span>
+                  <span className="tags">
+                    {t.path.includes('/.claude/worktrees/') && <span className="tag">made by a Claude Code agent</span>}
+                    {t.dirty && <span className="tag warn">uncommitted changes</span>}
+                    {t.ahead > 0 && <span className="tag">{plural(t.ahead, 'commit')} ahead</span>}
+                    {t.ahead === 0 && !t.dirty && <span className="tag">no new commits</span>}
+                    {t.conversation && <span className="tag">Claude conversation · {ago(t.conversation.at * 1000)}</span>}
+                    {isStale(t) && <span className="tag">quiet for {Math.floor((Date.now() / 1000 - t.at) / 86400)} days</span>}
+                    {!isStale(t) && !t.conversation && t.at > 0 && <span className="tag">last commit {ago(t.at * 1000)}</span>}
+                  </span>
+                </>
+              )))}
+            </ul>
+          </>
+        )}
+
+        {scan.sessions.length > 0 && (
+          <>
+            <h2>Claude conversations in the main checkout <span>each moves here and resumes with its full history</span></h2>
+            <ul className="picks">
+              {scan.sessions.map((c, i) => row(c, scan.worktrees.length + i, (
+                <>
+                  <span className="pick-title">{c.title || `Conversation ${c.id.slice(0, 8)}`}</span>
+                  <span className="pick-sub">◷ {c.folder || 'main checkout'}{c.branch ? ` · ⎇ ${c.branch}` : ''} · {ago(c.at * 1000)}</span>
+                  {!isLive(c) && <span className="tags"><span className="tag">{c.title ? 'quiet for a day or more' : 'untitled: probably a quick one-off'}</span></span>}
+                </>
+              )))}
+            </ul>
+            <p className="hint">A conversation can run in one place at a time: after bringing it in, type <code>/exit</code> where it is running now, then press Enter in its Grove panel.</p>
+          </>
+        )}
+
+        {items.length > 0 && <SetupSummary config={scan.config} project={scan.project} />}
+
+        {short.length > 0 && (
+          <p className="sheet-warn" role="status">
+            ⚠ {short.map((x) => `${x.name} has ${x.free} free port${x.free === 1 ? '' : 's'} (${x.ports[0]}–${x.ports[1]})`).join(', ')} for {plural(trees.length, 'worktree')}.
+            {' '}Widen the range in <a role="link" tabIndex={0} onClick={() => hub.openConfig(scan.project)} onKeyDown={(e) => e.key === 'Enter' && hub.openConfig(scan.project)}>project.json</a> first,
+            or bring them in anyway: the rest wait under “Fix with Claude”.
+          </p>
+        )}
+        <div className="sheet-actions">
+          {items.length > 0 && (
+            <button className="btn primary" type="button" disabled={!count || running} onClick={bringIn}>
+              {running ? 'Bringing in…' : count ? `Bring in ${count}  ⌘↩` : 'Pick something to bring in'}
+            </button>
+          )}
+          <button className="btn" type="button" disabled={running} onClick={() => onClose(items.map(keyOf))}>{items.length ? 'Not now  esc' : 'Close  esc'}</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+// ---------- what could not come in: shown, then handed to a briefed Claude session on request ----------
+function FixSheet({ project, onClose, onStarted, onChanged }) {
+  const [draft, setDraft] = useState(null)
+  const [brief, setBrief] = useState('')
+  const [starting, setStarting] = useState(false)
+  const [error, setError] = useState('')
+  const load = useCallback(async () => {
+    const r = await hub.grove(['fix-import', '--project', project, '--draft', '--json'])
+    try {
+      const d = JSON.parse(r.stdout)
+      setDraft(d)
+      setBrief(d.brief)
+    } catch { setError((r.stderr || r.stdout).trim() || 'could not read what failed') }
+  }, [project])
+  useEffect(() => { load() }, [load])
+  const fixable = draft ? draft.failures.filter((x) => x.fixable) : []
+  const start = async () => {
+    if (!brief.trim() || starting) return
+    setStarting(true)
+    const r = await hub.grove(['fix-import', '--project', project, '--start', '-p', brief])
+    setStarting(false)
+    const name = /^([a-z0-9][a-z0-9._-]*): /m.exec(r.stdout)?.[1]
+    if (r.code || !name) return setError((r.stderr || r.stdout).trim())
+    onStarted(name)
+  }
+  const forget = async (key) => {
+    await hub.grove(['fix-import', '--project', project, '--forget', key])
+    onChanged()
+    load()
+  }
+  return (
+    <div className="sheet-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <section className="sheet" role="dialog" aria-modal="true" aria-labelledby="fix-title"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose()
+          if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); start() }
+        }}>
+        <h1 id="fix-title">Fix what couldn't come in</h1>
+        {!draft && !error && <p className="busy">Looking at what failed…</p>}
+        {draft && (
+          <>
+            <ul className="picks">
+              {draft.failures.map((x) => (
+                <li key={keyOf(x)}>
+                  <div className="pick on">
+                    <span className="pick-text">
+                      <span className="pick-title">{x.title || (x.path ? humanize(x.branch || x.path) : `Conversation ${x.id.slice(0, 8)}`)}</span>
+                      <span className="pick-sub">{x.path ? `⎇ ${x.branch} · ${home(x.path)}` : `◷ conversation ${x.id.slice(0, 8)}`}</span>
+                      <span className="fail-error">✗ {(x.error || '').split('\n').filter(Boolean).slice(-1)[0]}</span>
+                      {!x.fixable && <span className="tags"><span className="tag">can't come in: {x.why}</span></span>}
+                    </span>
+                    {!x.fixable && <button className="btn" type="button" onClick={() => forget(keyOf(x))}>Forget it</button>}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {fixable.length > 0 ? (
+              <>
+                <label className="brief-label" htmlFor="fix-brief">What Claude will be asked <span>edit it if you like; it starts only when you say so</span></label>
+                <textarea id="fix-brief" className="doc-text brief" value={brief} onChange={(e) => setBrief(e.target.value)} spellCheck={false} autoFocus />
+                <p className="hint">Claude works in its own session, <b>Fix import</b>, under Sessions in the sidebar. It asks before changing anything, as Claude Code always does, and is told to leave your code, worktrees and branches alone.</p>
+              </>
+            ) : draft.failures.length === 0 ? <p className="sheet-sub">Everything that failed is in Grove now.</p> : null}
+          </>
+        )}
+        {error && <p className="sheet-error">{error}</p>}
+        <div className="sheet-actions">
+          {fixable.length > 0 && (
+            <button className="btn primary" type="button" disabled={starting || !brief.trim()} onClick={start}>
+              {starting ? 'Starting…' : 'Start fixing with Claude  ⌘↩'}
+            </button>
+          )}
+          <button className="btn" type="button" onClick={onClose}>{fixable.length ? 'Not now  esc' : 'Close  esc'}</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function App() {
   const [state, setState] = useState({ features: [], palette: {} })
   const [current, setCurrent] = useState(() => localStorage.getItem(`current:${hub.project}`) || '')
@@ -611,6 +893,44 @@ function App() {
   const [creating, setCreating] = useState(null)
   const [toast, setToast] = useState(null)
   const filterRef = useRef(null)
+  // work on this repo that Grove is not running yet (grove import --json), and what was set aside
+  const [scan, setScan] = useState(null)
+  const [sheet, setSheet] = useState(false)
+  const [fixing, setFixing] = useState(false)
+  const [dismissed, setDismissed] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(`dismissed:${hub.project}`) || '[]') } catch { return [] }
+  })
+  const rescan = useCallback(async () => {
+    if (!hub.project) return null
+    const found = await hub.scanImport(hub.project)
+    setScan(found)
+    return found
+  }, [])
+  // quiet: on opening a project just added, only show the sheet when there is something to bring in
+  const review = useCallback(async (quiet = false) => {
+    const found = await rescan()
+    if (found?.error) return say(found.error, true)
+    if (!found) return
+    if (quiet && !found.worktrees.length && !found.sessions.length) {
+      return say(`${found.project} is ready. Nothing of it is running outside Grove: start a feature with ⌘N.`)
+    }
+    setSheet(true)
+  }, [rescan])
+  useEffect(() => {
+    if (!hub.project) return
+    if (hub.review) review(true)
+    else rescan()
+    let last = Date.now()
+    const onFocus = () => { if (Date.now() - last > 60000) { last = Date.now(); rescan() } }
+    window.addEventListener('focus', onFocus)
+    const timer = setInterval(rescan, 5 * 60000)
+    return () => { window.removeEventListener('focus', onFocus); clearInterval(timer) }
+  }, [])
+  const setAside = (keys) => {
+    const next = [...new Set([...dismissed, ...keys])]
+    setDismissed(next)
+    localStorage.setItem(`dismissed:${hub.project}`, JSON.stringify(next))
+  }
 
   useEffect(() => {
     hub.state(hub.project).then(setState)
@@ -709,11 +1029,12 @@ function App() {
 
   // menu accelerators and ⌘1…9
   const latest = useRef({})
-  latest.current = { f, features, toggle, open, zoom, setTab, sessionsNow: f ? hosted[f.name] : null }
+  latest.current = { f, features, toggle, open, zoom, setTab, review, sessionsNow: f ? hosted[f.name] : null }
   useEffect(() => {
     hub.onMenu(async (action) => {
       const { f, toggle, open, zoom } = latest.current
       if (action === 'new') setNewOpen(true)
+      if (action === 'import') latest.current.review()
       if (action === 'find') filterRef.current?.focus()
       if (action === 'rename' && f) setRenaming(f.name)
       if (action === 'restart' && f) {
@@ -768,11 +1089,27 @@ function App() {
     <div className="app" style={vars}>
       <Sidebar project={state.project} repo={state.repo || ''} elsewhere={Object.values(state.waitingElsewhere || {}).reduce((a, b) => a + b, 0)} features={features} current={f?.name} onPick={(n) => { setCurrent(n); setZoom(null) }} onMenu={rowMenu}
         renaming={renaming} setRenaming={setRenaming} onRename={rename}
-        newOpen={newOpen} setNewOpen={(v) => { if (!v) setSeed(''); setNewOpen(v) }} seed={seed} onCreate={create} creating={creating} filterRef={filterRef} />
+        newOpen={newOpen} setNewOpen={(v) => { if (!v) setSeed(''); setNewOpen(v) }} seed={seed} onCreate={create} creating={creating} filterRef={filterRef}
+        waitingOutside={outside(scan, dismissed).length} onReview={() => review()}
+        failedCount={scan?.failures?.length || 0} onFix={() => setFixing(true)} />
       <main className="main">
         {!f && (
           <div className="empty">
-            {state.project ? (
+            {state.project && outside(scan, dismissed).length > 0 ? (
+              <>
+                <h1>Bring in your work from {state.project}</h1>
+                <p>{(() => {
+                  const out = outside(scan, dismissed)
+                  const t = out.filter((x) => x.path).length
+                  const c = out.length - t
+                  return [t && plural(t, 'worktree'), c && plural(c, 'Claude conversation')].filter(Boolean).join(' and ')
+                })()} in progress outside Grove.</p>
+                <div className="empty-actions">
+                  <button className="btn primary" type="button" onClick={() => review()}>Review and bring in  ⌘⇧I</button>
+                  <button className="btn" type="button" onClick={() => setNewOpen(true)}>New feature  ⌘N</button>
+                </div>
+              </>
+            ) : state.project ? (
               <>
                 <h1>No features in {state.project} yet</h1>
                 <p>Each feature gets a worktree, its own ports, services and a Claude session.</p>
@@ -781,7 +1118,7 @@ function App() {
             ) : (
               <>
                 <h1>Add a project to begin</h1>
-                <p>Choose the main checkout of a git repository. A .grove.json in it describes its services.</p>
+                <p>Choose a git repository. Grove then shows the work already in flight on it (worktrees, Claude conversations) so you can bring it in.</p>
                 <button className="btn primary" type="button" onClick={() => hub.addProject()}>Add project  ⌘⇧O</button>
               </>
             )}
@@ -825,6 +1162,25 @@ function App() {
           </>
         )}
       </main>
+      {sheet && scan && !scan.error && (
+        <ImportSheet scan={scan} justAdded={hub.review && !features.length} dismissed={dismissed}
+          onClose={(keys) => { setAside(keys); setSheet(false) }}
+          onDone={async (made, counts, skipped, failed) => {
+            setAside(skipped)
+            setSheet(false)
+            if (failed.length) await hub.grove(['fix-import', '--project', scan.project, '--record', JSON.stringify(failed)])
+            rescan()
+            if (made[0]) { setCurrent(made[0]); setZoom(null) }
+            const brought = [counts.trees && plural(counts.trees, 'worktree'), counts.chats && plural(counts.chats, 'conversation')].filter(Boolean).join(' and ')
+            say([brought && `Brought in ${brought}.`,
+              failed.length && `${failed.length} couldn't come in: “Fix with Claude” in the sidebar shows why and can sort it out.`,
+              counts.chats > 0 && 'Type /exit where each conversation runs now, then press Enter in its panel.'].filter(Boolean).join(' '), failed.length > 0 && !made.length)
+          }} />
+      )}
+      {fixing && scan && (
+        <FixSheet project={scan.project} onClose={() => setFixing(false)} onChanged={rescan}
+          onStarted={(name) => { setFixing(false); setCurrent(name); setZoom(null); rescan() }} />
+      )}
       {toast && <div className={`toast ${toast.isError ? 'error' : ''}`} role="status">{toast.text}</div>}
     </div>
   )
