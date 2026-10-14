@@ -1,37 +1,71 @@
 #!/usr/bin/env bash
-# Set Grove up on this Mac: check the tools it needs, link this checkout into the places Grove's pieces
-# are loaded from, have every Claude Code session load the mod, and (with --app) build the app.
-#   ./install.sh [--app] [<repo>…]     each <repo> is brought in with `grove import` (a dry run)
-# Safe to re-run.
+# Set Grove up on this Mac: check the tools it needs (offering to brew install the missing ones), link
+# this checkout into the places Grove's pieces are loaded from, have every Claude Code session load the
+# mod, and (with --app) build Grove.app into /Applications.
+#   ./install.sh [--app] [--yes] [<repo>…]   --yes installs missing tools without asking; each <repo>
+#                                            is brought in with `grove import` (a dry run)
+# Safe to re-run; `git pull && ./install.sh --app` is also how to update.
 set -euo pipefail
 R="$(cd "$(dirname "$0")" && pwd)"
 H="$HOME/.grove"
 APP=0
+YES=0
 REPOS=()
 for a in "$@"; do
   case "$a" in
     --app) APP=1 ;;
-    -h|--help) sed -n 2,5p "$0"; exit 0 ;;
+    --yes|-y) YES=1 ;;
+    -h|--help) sed -n 2,7p "$0"; exit 0 ;;
     *) REPOS+=("$a") ;;
   esac
 done
 
-# 1. tools
-missing=()
-for t in git tmux gh claude python3; do command -v "$t" >/dev/null || missing+=("$t"); done
-if [ "$APP" = 1 ]; then command -v npm >/dev/null || missing+=("npm"); fi
-if [ ${#missing[@]} -gt 0 ]; then
-  echo "Missing: ${missing[*]}"
-  for t in "${missing[@]}"; do
+# 1. tools: brew installs what it can (tmux, gh, node), with your OK
+for d in /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
+  case ":$PATH:" in *":$d:"*) ;; *) [ -d "$d" ] && PATH="$d:$PATH" ;; esac
+done
+need=(git tmux gh claude python3)
+[ "$APP" = 1 ] && need+=(npm)
+brewable=()
+manual=()
+for t in "${need[@]}"; do
+  command -v "$t" >/dev/null && continue
+  case "$t" in
+    tmux|gh) brewable+=("$t") ;;
+    npm) brewable+=("node") ;;
+    *) manual+=("$t") ;;
+  esac
+done
+if [ ${#brewable[@]} -gt 0 ]; then
+  if ! command -v brew >/dev/null; then
+    manual+=("${brewable[@]}")
+    echo "Homebrew is not installed; get it from https://brew.sh, then re-run ./install.sh"
+  else
+    ok=$YES
+    if [ "$ok" = 0 ] && [ -t 0 ]; then
+      read -r -p "Grove needs ${brewable[*]}. Install with Homebrew now? [Y/n] " reply
+      case "$reply" in [nN]*) ;; *) ok=1 ;; esac
+    fi
+    if [ "$ok" = 1 ]; then
+      brew install "${brewable[@]}"
+    else
+      manual+=("${brewable[@]}")
+    fi
+  fi
+fi
+if [ ${#manual[@]} -gt 0 ]; then
+  echo "Still missing: ${manual[*]}"
+  for t in "${manual[@]}"; do
     case "$t" in
-      claude) echo "  claude:  npm install -g @anthropic-ai/claude-code   (or see claude.com/claude-code)" ;;
-      npm) echo "  npm:     brew install node" ;;
+      claude) echo "  claude:   curl -fsSL https://claude.ai/install.sh | bash   (then run claude once to sign in)" ;;
+      git|python3) echo "  $t:  xcode-select --install" ;;
+      node) echo "  node:     brew install node" ;;
       *) echo "  $t:  brew install $t" ;;
     esac
   done
   exit 1
 fi
-gh auth status >/dev/null 2>&1 || echo "note: gh is not logged in (gh auth login); PR and CI status stay empty until it is"
+gh auth status >/dev/null 2>&1 || echo "note: gh is not signed in (gh auth login); PR and CI status stay empty until it is"
 
 # 2. links
 mkdir -p "$H/bin" "$H/projects"
@@ -83,11 +117,14 @@ else:
     print("settings: Claude Code already loads the Grove mod")
 PY
 
-# 4. the app
+# 4. the app (quit first so the copy in /Applications can be replaced; agents keep running in tmux)
 if [ "$APP" = 1 ]; then
-  (cd "$R" && npm install && npm run install-app)
+  running=0
+  if pgrep -xq Grove; then running=1; osascript -e 'quit app "Grove"' >/dev/null 2>&1 || true; sleep 2; fi
+  (cd "$R" && npm install --no-fund --no-audit && npm run install-app)
   "$H/bin/grove" ui app >/dev/null
   echo "app: /Applications/Grove.app"
+  [ "$running" = 1 ] && open -a Grove
 fi
 
 # 5. projects

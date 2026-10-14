@@ -140,18 +140,27 @@ to start a second Claude on a worktree that already has one.
 
 ## Install
 
+You need a Mac with Homebrew and Claude Code (signed in). Then, in a terminal:
+
 ```sh
-./install.sh --app ~/code/my-repo
+gh repo clone ramkivenkatachalam/grove ~/grove && ~/grove/install.sh --app ~/code/my-repo
 ```
 
-That one line:
+(`git clone` works too, if you have the repo URL.) Grove is built on your Mac rather than downloaded,
+so macOS opens it without a security prompt. Then open **Grove** from Applications.
 
-1. checks for `git`, `tmux`, `gh`, `claude` and `python3`, and says how to install any that are missing
+`install.sh`:
+
+1. checks for `git`, `tmux`, `gh`, `claude` and `python3` (and `node` with `--app`), and offers to
+   `brew install` the missing ones (`--yes` installs without asking)
 2. links `cli/`, `mod/` and `tmux/` into `~/.grove` and puts `grove` on your PATH (`~/.local/bin`)
 3. has every Claude Code session load the mod: it adds `env.CLAUDE_CODE_PLUGIN_DIRS` (and a status
    line, if you have none) to `~/.claude/settings.json`, keeping a backup
-4. with `--app`, builds Grove.app into `/Applications`
+4. with `--app`, builds Grove.app into `/Applications` (quitting and reopening Grove if it is running;
+   agents and servers keep running)
 5. for each repo you name, runs `grove import` as a dry run (below)
+
+To update: `cd ~/grove && git pull && ./install.sh --app`.
 
 It is safe to re-run. Then restart running Claude sessions so they load the mod, and run `grove doctor`.
 
