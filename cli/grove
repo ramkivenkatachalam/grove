@@ -1774,8 +1774,7 @@ def add_project(repo: Path, name: str | None = None, out=sys.stdout) -> str | No
     if not (repo / ".grove.json").exists():
         mine["services"] = detect_services(repo)
         mine["setup"] = detect_setup(repo)
-        mine["_help"] = ("Grove project config — see `grove` docs: services, setup, env, labels, checks, agentNotes. "
-                         "Commit a .grove.json to the repo to share it; keys here override it.")
+        mine["_help"] = STARTER_HELP
     write_json(project_conf(name), mine)
     cfg = read_json(CONFIG, {})
     if not cfg.get("defaultProject"):
@@ -1826,12 +1825,24 @@ def loose_worktrees(p: dict) -> list[dict]:
     return sorted(rows, key=lambda r: -r["at"])
 
 
+STARTER_HELP = ("Grove project config — see `grove` docs: services, setup, env, labels, checks, agentNotes. "
+                "Commit a .grove.json to the repo to share it; keys here override it.")
+
+
 def config_summary(p: dict) -> dict:
-    """How Grove will run the project's features, for people to check before bringing work in."""
-    return {"source": ".grove.json" if (p["repo"] / ".grove.json").exists() else "starter",
-            "file": str(project_conf(p["name"])), "base": p.get("base"),
-            "services": [{"name": s["name"], "dir": s.get("dir", ""), "run": s.get("run", ""), "ports": s.get("ports")}
-                         for s in services(p)],
+    """How Grove will run the project's features, for people to check before bringing work in: where
+    the config came from (the repo's .grove.json, your own project.json, or Grove's starter guess) and,
+    per service, how many of its ports are free for new features."""
+    mine = read_json(project_conf(p["name"]), {})
+    source = (".grove.json" if (p["repo"] / ".grove.json").exists()
+              else "starter" if mine.get("_help") == STARTER_HELP else "project.json")
+    taken = listening() | {port for f in features() for port in ports(f).values()}
+    rows = []
+    for s in services(p):
+        lo, hi = (s.get("ports") or [4000, 4999])[:2]
+        free = sum(1 for port in range(lo, hi + 1) if port not in taken and port not in set(s.get("reserved", [])))
+        rows.append({"name": s["name"], "dir": s.get("dir", ""), "run": s.get("run", ""), "ports": [lo, hi], "free": free})
+    return {"source": source, "file": str(project_conf(p["name"])), "base": p.get("base"), "services": rows,
             "setup": {k: v for k, v in p["setup"].items() if v}}
 
 

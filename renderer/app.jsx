@@ -644,16 +644,16 @@ function SetupSummary({ config, project }) {
       <summary>
         <b>How Grove will run them</b>
         <span>{svc.length ? `${svc.map((x) => x.name).join(' and ')}, each on its own port` : 'a Claude session and a shell (no dev servers found)'}
-          {' · '}{config.source === '.grove.json' ? "from the repo's .grove.json" : 'guessed from the repo'}</span>
+          {' · '}{{ '.grove.json': "from the repo's .grove.json", 'project.json': 'from your project.json', starter: 'guessed from the repo' }[config.source]}</span>
       </summary>
       <dl className="facts-list">
         {svc.map((x) => (
-          <div key={x.name}><dt>{x.name}</dt><dd><code>{x.dir || '.'}</code> · <code>{x.run.replace(/^exec /, '')}</code>{x.ports ? ` · ports ${x.ports[0]}–${x.ports[1]}` : ''}</dd></div>
+          <div key={x.name}><dt>{x.name}</dt><dd><code>{x.dir || '.'}</code> · <code>{x.run.replace(/^exec /, '')}</code> · ports {x.ports[0]}–{x.ports[1]}, {x.free} free</dd></div>
         ))}
         {lines.map(([what, value]) => <div key={what}><dt>{what}</dt><dd><code>{value}</code></dd></div>)}
       </dl>
       <p className="hint">
-        {config.source === '.grove.json' ? 'Your own changes go in ' : 'Wrong guess? Fix it in '}
+        {config.source === 'starter' ? 'Wrong guess? Fix it in ' : 'Your own changes go in '}
         <a role="link" tabIndex={0} onClick={() => hub.openConfig(project)} onKeyDown={(e) => e.key === 'Enter' && hub.openConfig(project)}>project.json</a>
         {' '}before bringing work in; it applies to every feature from then on.
       </p>
@@ -678,6 +678,8 @@ function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
   const trees = scan.worktrees.filter((t) => picked.has(t.path) && progress[t.path] !== 'done')
   const chats = scan.sessions.filter((c) => picked.has(c.id) && progress[c.id] !== 'done')
   const count = trees.length + chats.length
+  // a service with fewer free ports than worktrees ticked: the rest would fail, so say so up front
+  const short = scan.config.services.filter((x) => x.free < trees.length)
 
   const bringIn = async () => {
     if (!count || running) return
@@ -743,6 +745,7 @@ function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
                   <span className="pick-title">{t.conversation?.title || humanize(t.branch)}</span>
                   <span className="pick-sub">⎇ {t.branch} · {home(t.path)}</span>
                   <span className="tags">
+                    {t.path.includes('/.claude/worktrees/') && <span className="tag">made by a Claude Code agent</span>}
                     {t.dirty && <span className="tag warn">uncommitted changes</span>}
                     {t.ahead > 0 && <span className="tag">{plural(t.ahead, 'commit')} ahead</span>}
                     {t.ahead === 0 && !t.dirty && <span className="tag">no new commits</span>}
@@ -774,6 +777,13 @@ function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
 
         {items.length > 0 && <SetupSummary config={scan.config} project={scan.project} />}
 
+        {short.length > 0 && (
+          <p className="sheet-warn" role="status">
+            ⚠ {short.map((x) => `${x.name} has ${x.free} free port${x.free === 1 ? '' : 's'} (${x.ports[0]}–${x.ports[1]})`).join(', ')} for {plural(trees.length, 'worktree')}.
+            {' '}Widen the range in <a role="link" tabIndex={0} onClick={() => hub.openConfig(scan.project)} onKeyDown={(e) => e.key === 'Enter' && hub.openConfig(scan.project)}>project.json</a> first,
+            or bring them in anyway: the rest wait under “Fix with Claude”.
+          </p>
+        )}
         <div className="sheet-actions">
           {items.length > 0 && (
             <button className="btn primary" type="button" disabled={!count || running} onClick={bringIn}>

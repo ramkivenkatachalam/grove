@@ -137,7 +137,7 @@ assert sorted(s["copy"]) == ["api/.env", "web/.env.local"], s' "$GROVE_HUB/proje
 import json, sys
 d = json.loads(sys.argv[1])
 assert d["project"] == "acme-shop" and d["added"] is True, d
-assert [s["name"] for s in d["config"]["services"]] == ["web", "api"] and d["config"]["source"] == "starter", d["config"]
+assert [s["name"] for s in d["config"]["services"]] == ["web", "api"] and d["config"]["source"] == "starter" and all(s["free"] > 0 for s in d["config"]["services"]), d["config"]
 w = {t["branch"]: t for t in d["worktrees"]}
 assert sorted(w) == ["fix/login-redirect", "tester/csv-export", "tester/search-spike"], sorted(w)
 csv = w["tester/csv-export"]

@@ -202,3 +202,5 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .brief-label { color: var(--accent); font-weight: 600; margin-top: 6px; }
 .brief-label span { color: var(--text-3); font-weight: 400; margin-left: 8px; }
 .doc-text.brief { min-height: 220px; height: 280px; flex: none; font-size: 12px; }
+.sheet-warn { margin: 0; color: var(--waiting); border: 1px solid #6a4a3a; border-radius: 6px; padding: 8px 10px; font-size: 12px; }
+.sheet-warn a { color: var(--waiting); text-decoration: underline; cursor: pointer; }
