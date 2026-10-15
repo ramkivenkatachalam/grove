@@ -558,7 +558,7 @@ export const register: Register = on => {
         type: 'object',
         required: ['name', 'task', 'context'],
         properties: {
-          name: { type: 'string', description: 'Short lowercase kebab-case name (e.g. csv-export), or a Linear ticket id like NUM-1234' },
+          name: { type: 'string', description: 'Short lowercase kebab-case name (e.g. csv-export), or a ticket id like ABC-123' },
           title: { type: 'string', description: 'Human title shown in the Grove sidebar (e.g. "CSV export for variance report")' },
           task: { type: 'string', description: 'What the new session should do, in one or two sentences' },
           context: { type: 'string', description: 'The handover brief: findings, files, decisions, constraints, out of scope' },
@@ -705,7 +705,7 @@ export const register: Register = on => {
       return { text: 'Handing the review-bot findings to the agent.' }
     }
 
-    // a prompt with spaces: /feature new NUM-123 -p fix the totals row
+    // a prompt with spaces: /feature new ABC-123 -p fix the totals row
     const promptAt = rest.indexOf('-p')
     const argv = verb === ''
       ? [cli, 'ls']

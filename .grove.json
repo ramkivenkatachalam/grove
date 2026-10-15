@@ -6,5 +6,5 @@
   },
   "services": [],
   "checks": "Run what covers what you touched: `python3 -m py_compile cli/grove` and `python3 -m unittest discover tests` for the CLI; `claude plugin validate mod && claude plugin test mod` for the mod; `npm run build` (and a screenshot, see CLAUDE.md) for the app.",
-  "agentNotes": "Read CLAUDE.md first. Test against a throwaway hub with TMUX unset (env -u TMUX GROVE_HUB=/tmp/x/hub GROVE_BIN=$PWD/cli/grove TMUX_TMPDIR=/tmp/x/tm), never the live hub or tmux server. No Numos-specific config in this repo."
+  "agentNotes": "Read CLAUDE.md first. Test against a throwaway hub with TMUX unset (env -u TMUX GROVE_HUB=/tmp/x/hub GROVE_BIN=$PWD/cli/grove TMUX_TMPDIR=/tmp/x/tm), never the live hub or tmux server. No config for any particular project in this repo."
 }

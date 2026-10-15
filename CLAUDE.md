@@ -13,7 +13,7 @@ one git worktree per feature. README.md is the user-facing description; this fil
 | tmux front end | `tmux/grove.tmux.conf` | `~/.grove/tmux.conf`, sourced from `~/.tmux.conf` |
 
 Runtime state, never in git: `~/.grove/` — one folder per project, `projects/<p>/project.json`
-(per-project config; Numos's is private there), and in it one folder per feature, `projects/<p>/<f>/`
+(per-project config, private to each person), and in it one folder per feature, `projects/<p>/<f>/`
 with `feature.json` (registry), `status.json` (written by the mod), `brief.md` and `worktree/` (the git
 worktree, or a link to one made before this layout). `grove done` deletes a feature's folder, keeping its
 notes and retro in `projects/<p>/archive/<f>/`. Beside `project.json`: `prs.json`, `findings.json`, `github.json` (GitHub state is per project:
@@ -47,10 +47,10 @@ mod reports from inside each Claude session; tmux hosts every process (`grove_<f
 - **Accessibility**: every state carries a word, not just a colour; text ≥ 4.5:1 on its background;
   every click has a key.
 - **Commits**: this checkout commits as `ramkivenkatachalam <ramki@utexas.edu>`; no mention of Claude in
-  commit messages. Push to `origin` (github.com/ramkivenkatachalam/grove, private). Remote `work`
-  (ramki-numosai/grove) and branch `work-main` are frozen history — don't push there.
-- **Never put Numos-specific config in this repo.** Project specifics belong in that project's
-  `.grove.json` or the user's private `~/.grove/projects/<name>/project.json`.
+  commit messages. Push to `origin` (github.com/ramkivenkatachalam/grove). Any other remote, and the branch
+  `work-main`, are frozen history — don't push there.
+- **Never put config for a particular project in this repo** (no company, repo or service names). Project
+  specifics belong in that project's `.grove.json` or the user's private `~/.grove/projects/<name>/project.json`.
 
 ## Gotchas learned the hard way
 
@@ -73,7 +73,6 @@ mod reports from inside each Claude session; tmux hosts every process (`grove_<f
 
 ## Open items
 
-- Numos config should move into the numosai repo as a committed `.grove.json` (needs a PR there).
 - Teammates can't open the repo yet (private on a personal account): invite them or make it public.
 - Pitch video (`~/Desktop/Grove-pitch-music.mp4`): source and renderer were in a session scratchpad; if it
   needs more edits, move them into `docs/video/` first.
