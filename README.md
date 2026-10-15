@@ -55,6 +55,8 @@ code and branches stay as they are. ([More on bringing in work](#bringing-in-wor
 - **Dock badge** with the number of features waiting on you, plus desktop notifications.
 
 Quitting Grove stops nothing: every terminal is a tmux session (`grove_<feature>_<pane>`) that keeps running.
+tmux keeps them in memory, though, so a reboot ends them and the features show *offline*;
+`grove fix <name>` (or the Fix button, ⌘⇧F) reopens the panels and continues the Claude conversation.
 
 ## Projects
 
@@ -96,6 +98,8 @@ no `.grove.json` (`--force` to ask anyway), and never starts on its own.
 | `env` | Rewrites per worktree: `port` points `localhost:NNNN` in a key at a service; `set` sets a whole value (`{web}` = the web port) |
 | `labels` | Shows a value from an env file as a label (e.g. which database) and warns on some (e.g. `PROD`) |
 | `checks`, `agentNotes` | What Claude should run before finishing, and anything else it should know |
+| `panels` | Extra panels beside the services, each `{name, run, dir, key}` (e.g. a test watcher) |
+| `prs`, `ghUser` | `"prs": false` turns off PR/CI syncing; `ghUser` picks the `gh` account (otherwise Grove finds one that can see the repo and remembers it) |
 | `base`, `branchPrefix`, `worktrees` | Branch start point, branch naming (`{user}/`), where worktrees go (default: each feature's folder in `~/.grove`) |
 
 See [`examples/nextjs-fastapi.grove.json`](examples/nextjs-fastapi.grove.json).
@@ -149,6 +153,7 @@ to start a second Claude on a worktree that already has one.
 | Command | Does |
 |---|---|
 | `grove ls` | Features, ports, labels, PR/CI, state, recap → next |
+| `grove go <name>` · `grove attach` | Open a feature and switch to it · attach this terminal to Grove's tmux session (the terminal-only front end) |
 | `grove new <name\|TICKET> [-p task]` | A new feature: worktree, ports, env, services, a briefed Claude |
 | `grove import [<repo>] [--yes]` | Register a repo and bring in its worktrees and recent conversations (above) |
 | `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations one at a time (above) |
@@ -180,7 +185,8 @@ so macOS opens it without a security prompt. Then open **Grove** from Applicatio
 
 1. checks for `git`, `tmux`, `gh`, `claude` and `python3` (and `node` with `--app`), and offers to
    `brew install` the missing ones (`--yes` installs without asking)
-2. links `cli/`, `mod/` and `tmux/` into `~/.grove` and puts `grove` on your PATH (`~/.local/bin`)
+2. links `cli/`, `mod/` and `tmux/` into `~/.grove`, puts `grove` on your PATH (`~/.local/bin`) and adds
+   `source-file ~/.grove/tmux.conf` to your `~/.tmux.conf`
 3. has every Claude Code session load the mod: it adds `env.CLAUDE_CODE_PLUGIN_DIRS` (and a status
    line, if you have none) to `~/.claude/settings.json`, keeping a backup
 4. with `--app`, builds Grove.app into `/Applications` (quitting and reopening Grove if it is running;
@@ -193,21 +199,25 @@ It is safe to re-run. Then restart running Claude sessions so they load the mod,
 
 ## How it fits together
 
-```
- ┌──────────── Grove.app (Electron) ─────────────┐
- │ sidebar · header · Claude panel · log panels  │   one window per project
- └───────┬──────────────────────────┬────────────┘
-   reads state files          attaches terminals
-         │                          │
- ~/.grove/                     tmux sessions  grove_<feature>_<pane>
-   projects/<p>/<feature>/      (claude · shell · services …)
-     feature.json status.json       ▲            ▲
-         ▲      ▲                   │            │
-   writes│      │writes        starts│            │runs inside
-   ┌─────┴──┐ ┌─┴────────────────────┴──┐    ┌───┴─────────────┐
-   │ grove  │ │ Claude Code mod          │    │ Claude Code     │
-   │  CLI   │ │ (loaded by every session)│◀───│ sessions        │
-   └────────┘ └──────────────────────────┘    └─────────────────┘
+```mermaid
+flowchart LR
+    app["<b>Grove.app</b><br/>Electron · one window per project<br/><i>only draws</i>"]
+
+    subgraph tmux["tmux · grove_‹feature›_‹pane›"]
+        direction TB
+        claude["<b>Claude Code</b><br/>+ Grove mod"]
+        procs["shell · dev servers"]
+    end
+
+    cli["<b>grove CLI</b><br/><i>does the work</i>"]
+    state[("<b>~/.grove/</b><br/>feature.json<br/>status.json · recap.json")]
+
+    app -- "attaches terminals" --> tmux
+    app -. "reads" .-> state
+    cli -- "starts" --> tmux
+    cli -- "writes" --> state
+    claude -- "reports state" --> state
+    claude -. "spins off features" .-> cli
 ```
 
 The app only draws; the CLI does the work; the mod reports from inside each Claude session; tmux
@@ -228,18 +238,24 @@ State lives in `~/.grove/`, one folder per project and per feature:
 ~/.grove/projects/<project>/project.json             your config for the project
 ~/.grove/projects/<project>/<feature>/feature.json   registry entry
                                      /status.json    session state, written by the mod
-                                     /brief.md       the task, until the agent picks it up
+                                     /brief.md       the task; brief.sent.md once Claude has it
                                      /recap.json     the Summary tab's recap (grove recap)
                                      /notes.md  retro.md   the Summary tab's Scratchpad and Retro
                                      /worktree/      the feature's git worktree
+~/.grove/projects/<project>/s-<id>/                  a conversation under Sessions: feature.json
+                                                     (kind "session"), status.json, recap.json; no worktree
+~/.grove/projects/<project>/archive/<feature>/       notes and retro kept by grove done
 ~/.grove/projects/<project>/prs.json                 your PRs on the repo, by branch (grove pr)
                            /findings.json            review-bot comments already seen, by PR number
                            /github.json              the gh account that can see the repo
+~/.grove/config.json       ui (app|tmux), defaultProject, keepAwake
+~/.grove/focus.json        the feature the app should switch to (written by grove new, import)
+~/.grove/theme.json        header palettes (grove theme)
+~/.grove/bin/grove  mod  tmux.conf                   links into the repo, made by install.sh
 ```
 
-plus `theme.json`, `config.json` and `focus.json` at the top. PR state is kept per project because
-branch names are only unique within one repo. A hub from an older version moves over with
-`grove migrate` (existing worktrees stay put; their feature folders link to them).
+PR state is kept per project because branch names are only unique within one repo. A hub from an
+older version moves over with `grove migrate` (existing worktrees stay put; their feature folders link to them).
 
 ## Develop
 

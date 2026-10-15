@@ -14,12 +14,16 @@ one git worktree per feature. README.md is the user-facing description; this fil
 
 Runtime state, never in git: `~/.grove/` — one folder per project, `projects/<p>/project.json`
 (per-project config, private to each person), and in it one folder per feature, `projects/<p>/<f>/`
-with `feature.json` (registry), `status.json` (written by the mod), `brief.md` and `worktree/` (the git
-worktree, or a link to one made before this layout). `grove done` deletes a feature's folder, keeping its
-notes and retro in `projects/<p>/archive/<f>/`. Beside `project.json`: `prs.json`, `findings.json`, `github.json` (GitHub state is per project:
-branch names are only unique within one repo). At the top: `theme.json`,
-`config.json` (`ui: app|tmux`, `defaultProject`), `focus.json`. Feature names are unique across projects
-(tmux sessions are named by them). The app's file watcher ignores everything under `worktree/`.
+with `feature.json` (registry), `status.json` (written by the mod), `recap.json`, `brief.md` (renamed
+`brief.sent.md` once `grove agent` hands it to Claude), `notes.md`/`retro.md` and `worktree/` (the git
+worktree, or a link to one made before this layout). A conversation brought in under Sessions gets
+`projects/<p>/s-<id>/` instead: a `feature.json` with `"kind": "session"` and no worktree. `grove done`
+deletes a feature's folder, keeping its notes and retro in `projects/<p>/archive/<f>/`. Beside
+`project.json`: `prs.json`, `findings.json`, `github.json` (GitHub state is per project: branch names
+are only unique within one repo). At the top: `theme.json`, `config.json` (`ui: app|tmux`,
+`defaultProject`, `keepAwake`), `focus.json` (the feature the app switches to), plus the install links
+`bin/grove`, `mod` and `tmux.conf`. Feature names are unique across projects (tmux sessions are named
+by them). The app's file watcher ignores everything under `worktree/`.
 
 How they connect: the app only draws (reads state files, attaches terminals); the CLI does the work; the
 mod reports from inside each Claude session; tmux hosts every process (`grove_<feature>_<pane>` sessions).
