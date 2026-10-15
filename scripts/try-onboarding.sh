@@ -147,6 +147,18 @@ f = json.load(open(sys.argv[1] + "/feature.json"))
 assert f["kind"] == "session" and f["helper"] == "setup" and f["addDirs"] == [sys.argv[2]], f' \
       "$GROVE_HUB/projects/acme-shop/setup-acme-shop" "$REPO"
     step "a second start opens the same session" has "$("$GROVE_BIN" project setup acme-shop --start 2>&1)" "already open"
+    mkdir -p "$T/fakebin" && printf '#!/bin/sh\nfor a in "$@"; do printf "%%s\\n" "$a"; done > "%s/claude-args"\n' "$T" > "$T/fakebin/claude"
+    # a copy of the row in an empty folder (the real one's pane may have Claude running already)
+    s="$GROVE_HUB/projects/acme-shop/setup-probe"; mkdir -p "$s/worktree"
+    for b in brief.md brief.sent.md; do [ -f "${s%-probe}-acme-shop/$b" ] && cp "${s%-probe}-acme-shop/$b" "$s/brief.md" && break; done
+    sed -e 's/"setup-acme-shop"/"setup-probe"/' -e 's#setup-acme-shop/worktree#setup-probe/worktree#' "$GROVE_HUB/projects/acme-shop/setup-acme-shop/feature.json" > "$s/feature.json"
+    chmod +x "$T/fakebin/claude" && PATH="$T/fakebin:$PATH" "$GROVE_BIN" agent setup-probe </dev/null >/dev/null 2>&1
+    rm -rf "$s"
+    step "Claude gets the repo as a folder and the brief as its prompt" python3 -c '
+import sys
+a = open(sys.argv[1]).read().split("\n")
+i = a.index("--add-dir")
+assert a[i + 1] == sys.argv[2] and a[i + 2] == "--" and a[i + 3] == "# Set up acme-shop for Grove", a[:6]' "$T/claude-args" "$REPO"
     step "closing it leaves the project's config alone" sh -c "'$GROVE_BIN' done setup-acme-shop >/dev/null 2>&1 && grep -q '\"repo\"' '$GROVE_HUB/projects/acme-shop/project.json'"
     echo '{}' > "$REPO/.grove.json"
     step "is not offered over a .grove.json" sh -c "! '$GROVE_BIN' project setup acme-shop --draft >/dev/null 2>&1"

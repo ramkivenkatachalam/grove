@@ -1494,7 +1494,7 @@ def cmd_agent(name: str) -> None:
     if brief.exists():
         text = brief.read_text()
         brief.rename(brief.with_suffix(".sent.md"))
-        os.execvp("claude", ["claude", *extra, text])
+        os.execvp("claude", ["claude", *extra, "--", text])  # --add-dir takes several: end it before the brief
     transcripts = HOME / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", f["path"])
     if any(transcripts.glob("*.jsonl")):
         os.execvp("claude", ["claude", *extra, "--continue"])
