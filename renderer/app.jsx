@@ -192,6 +192,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
             )
           }
           const where = f.helper === 'import' ? '◷ bringing in what failed'
+            : f.helper === 'setup' ? '◷ setting up the project'
             : f.kind === 'session'
             ? `◷ ${placeOf(f.path, repo)} · ⎇ ${f.branch || '?'}`
             : null
@@ -267,7 +268,7 @@ function Header({ f, pal, panels, openList, onToggle, onFix, fixing, repo }) {
         </span>
         <span className="grow" />
         <span className="facts">
-          {f.helper === 'import' ? <span>helper · brings in what could not come in</span> : f.kind === 'session' ? <span>{placeOf(f.path, repo)} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
+          {f.helper === 'import' ? <span>helper · brings in what could not come in</span> : f.helper === 'setup' ? <span>helper · writes this project's Grove config</span> : f.kind === 'session' ? <span>{placeOf(f.path, repo)} · ⎇ {f.branch}</span> : pr ? <a role="link" tabIndex={0} onClick={() => hub.open(pr.url)} onKeyDown={(e) => e.key === 'Enter' && hub.open(pr.url)}>PR #{pr.number}</a> : <span>no PR</span>}
           {ci && <span style={{ color: ci[0] === 'ready' ? pal.ready : ci[0] }}>{ci[1]}</span>}
           {pr && pr.state !== 'OPEN' && <span>{pr.state.toLowerCase()}</span>}
           {pr?.findings > 0 && <span style={{ color: pal.accent }}>{pr.findings} finding{pr.findings > 1 ? 's' : ''}</span>}
@@ -634,7 +635,7 @@ const outside = (scan, dismissed) => scan && !scan.error
   ? [...scan.worktrees, ...scan.sessions].filter((item) => !dismissed.includes(keyOf(item)) && worthIt(item) && !failedKeys(scan).has(keyOf(item)))
   : []
 
-function SetupSummary({ config, project }) {
+function SetupSummary({ config, project, onSetup }) {
   const svc = config.services
   const st = config.setup
   const lines = [
@@ -644,11 +645,12 @@ function SetupSummary({ config, project }) {
     ...(st.run?.length ? [['Then runs', st.run.join(' · ')]] : []),
   ]
   return (
+    <>
     <details className="setup">
       <summary>
         <b>How Grove will run them</b>
         <span>{svc.length ? `${svc.map((x) => x.name).join(' and ')}, each on its own port` : 'a Claude session and a shell (no dev servers found)'}
-          {' · '}{{ '.grove.json': "from the repo's .grove.json", 'project.json': 'from your project.json', starter: 'guessed from the repo' }[config.source]}</span>
+          {' · '}{{ '.grove.json': "from the repo's .grove.json", 'project.json': 'from your project.json', starter: 'guessed from the repo', invalid: "the repo's .grove.json is broken (not a JSON object), so it is ignored" }[config.source]}</span>
       </summary>
       <dl className="facts-list">
         {svc.map((x) => (
@@ -662,10 +664,17 @@ function SetupSummary({ config, project }) {
         {' '}before bringing work in; it applies to every feature from then on.
       </p>
     </details>
+    {config.setupWithClaude && onSetup && (
+      <div className="setup-offer">
+        <button className="btn" type="button" onClick={onSetup}>Set up with Claude</button>
+        <span className="hint">{config.source === 'starter' ? 'That is a quick guess from a few file checks. ' : ''}A Claude session can read the repo and fill in your project.json: dev servers, ports, env files that point at other services, setup and checks.</span>
+      </div>
+    )}
+    </>
   )
 }
 
-function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
+function ImportSheet({ scan, justAdded, dismissed, onClose, onDone, onSetup }) {
   const items = [...scan.worktrees, ...scan.sessions]
   const [picked, setPicked] = useState(() => new Set(items
     .filter((item) => !dismissed.includes(keyOf(item)) && worthIt(item)).map(keyOf)))
@@ -733,7 +742,7 @@ function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
           if (e.key === 'Escape' && !running) onClose(items.map(keyOf))
           if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); bringIn() }
         }}>
-        <h1 id="import-title">Bring your work into Grove</h1>
+        <h1 id="import-title">{items.length ? 'Bring your work into Grove' : `${scan.project} is ready`}</h1>
         <p className="sheet-sub">
           {justAdded ? <>Added <b>{scan.project}</b>. </> : null}
           {items.length ? `Grove found ${[scan.worktrees.length && plural(scan.worktrees.length, 'worktree'), scan.sessions.length && plural(scan.sessions.length, 'Claude conversation')].filter(Boolean).join(' and ')} in progress in ` : 'Everything in '}
@@ -779,7 +788,7 @@ function ImportSheet({ scan, justAdded, dismissed, onClose, onDone }) {
           </>
         )}
 
-        {items.length > 0 && <SetupSummary config={scan.config} project={scan.project} />}
+        {(items.length > 0 || scan.config.source === 'starter') && <SetupSummary config={scan.config} project={scan.project} onSetup={onSetup} />}
 
         {short.length > 0 && (
           <p className="sheet-warn" role="status">
@@ -880,6 +889,56 @@ function FixSheet({ project, onClose, onStarted, onChanged }) {
   )
 }
 
+// ---------- a Claude session that reads the repo and writes a better project.json, on request ----------
+function SetupSheet({ project, onClose, onStarted }) {
+  const [brief, setBrief] = useState(null)
+  const [starting, setStarting] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    hub.grove(['project', 'setup', project, '--draft', '--json']).then((r) => {
+      try { setBrief(JSON.parse(r.stdout).brief) } catch { setError((r.stderr || r.stdout).trim() || 'could not draft the brief') }
+    })
+  }, [project])
+  const start = async () => {
+    if (!brief?.trim() || starting) return
+    setStarting(true)
+    const r = await hub.grove(['project', 'setup', project, '--start', '-p', brief])
+    setStarting(false)
+    const name = /^([a-z0-9][a-z0-9._-]*): /m.exec(r.stdout)?.[1]
+    if (r.code || !name) return setError((r.stderr || r.stdout).trim())
+    onStarted(name)
+  }
+  return (
+    <div className="sheet-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <section className="sheet" role="dialog" aria-modal="true" aria-labelledby="setup-title"
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') onClose()
+          if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); start() }
+        }}>
+        <h1 id="setup-title">Set up {project} with Claude</h1>
+        <p className="sheet-sub">Grove guessed how to run this repo from a few file checks. Claude can read it properly and fill in your project.json, so each feature gets its own servers, ports and env files.</p>
+        {brief === null && !error && <p className="busy">Drafting the brief…</p>}
+        {brief !== null && (
+          <>
+            <label className="brief-label" htmlFor="setup-brief">What Claude will be asked <span>edit it if you like; it starts only when you say so</span></label>
+            <textarea id="setup-brief" className="doc-text brief" value={brief} onChange={(e) => setBrief(e.target.value)} spellCheck={false} autoFocus />
+            <p className="hint">Claude works in its own session, <b>Set up {project}</b>, under Sessions in the sidebar. It writes only your project.json, leaves the repo and its .grove.json alone, and asks before changing anything.</p>
+          </>
+        )}
+        {error && <p className="sheet-error">{error}</p>}
+        <div className="sheet-actions">
+          {brief !== null && (
+            <button className="btn primary" type="button" disabled={starting || !brief.trim()} onClick={start}>
+              {starting ? 'Starting…' : 'Start setting up with Claude  ⌘↩'}
+            </button>
+          )}
+          <button className="btn" type="button" onClick={onClose}>Not now  esc</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function App() {
   const [state, setState] = useState({ features: [], palette: {} })
   const [current, setCurrent] = useState(() => localStorage.getItem(`current:${hub.project}`) || '')
@@ -901,6 +960,7 @@ function App() {
   const [scan, setScan] = useState(null)
   const [sheet, setSheet] = useState(false)
   const [fixing, setFixing] = useState(false)
+  const [settingUp, setSettingUp] = useState(false)
   const [dismissed, setDismissed] = useState(() => {
     try { return JSON.parse(localStorage.getItem(`dismissed:${hub.project}`) || '[]') } catch { return [] }
   })
@@ -915,7 +975,7 @@ function App() {
     const found = await rescan()
     if (found?.error) return say(found.error, true)
     if (!found) return
-    if (quiet && !found.worktrees.length && !found.sessions.length) {
+    if (quiet && !found.worktrees.length && !found.sessions.length && found.config?.source !== 'starter') {
       return say(`${found.project} is ready. Nothing of it is running outside Grove: start a feature with ⌘N.`)
     }
     setSheet(true)
@@ -1180,7 +1240,7 @@ function App() {
       </main>
       {sheet && scan && !scan.error && (
         <ImportSheet scan={scan} justAdded={hub.review && !features.length} dismissed={dismissed}
-          onClose={(keys) => { setAside(keys); setSheet(false) }}
+          onClose={(keys) => { setAside(keys); setSheet(false) }} onSetup={() => setSettingUp(true)}
           onDone={async (made, counts, skipped, failed) => {
             setAside(skipped)
             setSheet(false)
@@ -1192,6 +1252,10 @@ function App() {
               failed.length && `${failed.length} couldn't come in: “Fix with Claude” in the sidebar shows why and can sort it out.`,
               counts.chats > 0 && 'Type /exit where each conversation runs now, then press Enter in its panel.'].filter(Boolean).join(' '), failed.length > 0 && !made.length)
           }} />
+      )}
+      {settingUp && scan && (
+        <SetupSheet project={scan.project} onClose={() => setSettingUp(false)}
+          onStarted={(name) => { setSettingUp(false); setSheet(false); setCurrent(name); setZoom(null); rescan() }} />
       )}
       {fixing && scan && (
         <FixSheet project={scan.project} onClose={() => setFixing(false)} onChanged={rescan}

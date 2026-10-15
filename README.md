@@ -21,7 +21,9 @@ load Grove. ([What the installer does](#install))
 
 **2. Add your project.** In the app: **Add project** (⌘⇧O) and pick the repo (its main checkout or any
 of its worktrees). From a terminal: `grove project add ~/code/my-repo`. Grove guesses your dev servers,
-ports and setup from the repo, or reads them from its [`.grove.json`](#projects).
+ports and setup from the repo, or reads them from its [`.grove.json`](#projects). Without a
+`.grove.json`, that guess comes from a few file checks: **Set up with Claude** on the review sheet (or
+`grove project setup <name>`) has a Claude session read the repo and write a better one.
 
 **3. Bring in what you're doing, or start something new:**
 
@@ -66,10 +68,26 @@ grove new csv-export                 # in or outside the repo; --project picks o
 The config is the repo's own **`.grove.json`** (commit it to share it with your team) merged under
 **`~/.grove/projects/<name>/project.json`** (yours; at least `{"repo": "~/code/my-repo"}`).
 
+- `.grove.json` is read from the main checkout's **working tree**, not from `origin/main`: teammates
+  get a change once they pull, and you can try an uncommitted edit locally before committing it.
+- The merge is **shallow**: a key in your `project.json` replaces the team's whole value. To change one
+  service, copy the whole `services` list. Only `setup` merges per sub-key, and even there your
+  `setup.copy` (or `link`, `clone`, `run`) replaces the team's list rather than adding to it.
+- A `.grove.json` that isn't valid JSON is ignored (you get your `project.json` and the defaults, so no
+  services) with a warning on every command, and `grove doctor` reports it.
+
 Without a `.grove.json`, the starter config is a guess from the repo: a `dev` script in a
 `package.json` becomes a web service, a `main.py` or `manage.py` an API; Python envs (`.venv`, `venv`)
 are linked into each worktree, `node_modules` cloned, untracked `.env*` files copied, and the base
 branch follows `origin/HEAD`. Check it with `grove project show <name>`.
+
+For a better config, let Claude write it: **Set up with Claude** on the review sheet after Add project,
+or `grove project setup <name>` (`--draft` prints the brief, `--start` opens the session). A **Set up**
+session under Sessions reads the repo and fills in your `project.json`: every dev server and its ports,
+`env` rewrites so each feature's front end calls its own back end, setup, `checks` and `agentNotes`. It
+writes only your `project.json`, never the repo or its `.grove.json` (it asks before suggesting one),
+and finishes by checking `grove project show` and `grove doctor`. It is offered only when the repo has
+no `.grove.json` (`--force` to ask anyway), and never starts on its own.
 
 | Key | What it does |
 |---|---|
@@ -139,7 +157,7 @@ to start a second Claude on a worktree that already has one.
 | `grove rename <name> <title>` | The title shown in Grove |
 | `grove done <name> [--keep\|--force]` · `grove clean [--yes]` | Close a feature: removes its worktree, branch and state (notes and retro go to the project's `archive/`); stops if it has uncommitted or unmerged work unless `--force`, `--keep` keeps worktree and branch · close every merged, clean one |
 | `grove doctor` | Check projects and features: files, deps, ports, env, labels |
-| `grove project add\|ls\|default\|show` | Manage projects |
+| `grove project add\|ls\|default\|show\|setup` | Manage projects; `setup` has Claude write a project's config |
 | `grove pr` · `grove findings <name>` | Refresh PR/CI · list unanswered review-bot findings |
 | `grove retro <name>` | Drafts the feature's retro (what went well, what didn't, what to try next time with an agent) into its `retro.md`, from its conversations, recap and git. The Summary tab's Retro section has the same button |
 | `grove send <name> <text…>` | Types text into a feature's Claude session as one message (starts the session if needed). The Summary tab's Scratchpad sends a selection this way |
