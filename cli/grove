@@ -129,6 +129,14 @@ def expand(path: str) -> Path:
 # (shareable, committed by the team) merged under ~/.grove/projects/<name>/project.json
 # (yours: at least {"repo": …}; anything here overrides the repo's file). PROJECT_SCHEMA lists the keys;
 # the `grove project setup` brief hands it to Claude as is.
+#
+# .grove.json is read from the main checkout's working tree, not from origin/main: teammates see a
+# change once they pull, and an uncommitted edit can be tried locally first. A .grove.json that exists
+# but is not a JSON object is ignored with a warning (and a `grove doctor` failure), never silently.
+# The merge is shallow, except `setup`, which merges per sub-key over the defaults: a key in
+# project.json replaces the team's whole value, so overriding one service means copying the whole
+# `services` list, and setup.copy (or link, clone, run) in project.json replaces the team's list
+# rather than appending to it.
 
 PROJECT_SCHEMA = """\
   repo          the main checkout                        worktrees  where worktrees go (default: in each
@@ -168,12 +176,34 @@ def project_names() -> list[str]:
     return sorted(p.parent.name for p in PROJECTS.glob("*/project.json"))
 
 
+_warned: set[str] = set()
+
+
+def shared_config(repo: Path) -> tuple[dict, str | None]:
+    """The repo's .grove.json, read from the main checkout's working tree, and what is wrong with it.
+    Missing is fine ({}, None); a file that exists but is not a JSON object is a problem, not {}: a bad
+    commit would otherwise quietly drop everyone to the defaults, with no services."""
+    path = repo / ".grove.json"
+    if not path.exists():
+        return {}, None
+    try:
+        shared = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        return {}, f"{path} is not valid JSON ({e})"
+    if not isinstance(shared, dict):
+        return {}, f"{path} is not a JSON object"
+    return shared, None
+
+
 def project(name: str) -> dict:
     mine = read_json(project_conf(name), None)
     if mine is None:
         die(f"no project '{name}' (grove project ls)")
     repo = expand(mine.get("repo", ""))
-    shared = read_json(repo / ".grove.json", {})
+    shared, problem = shared_config(repo)
+    if problem and problem not in _warned:
+        _warned.add(problem)
+        print(f"grove: warning: {problem}; using {project_conf(name)} and defaults only", file=sys.stderr)
     p = {**DEFAULT_PROJECT, **shared, **mine}
     p["setup"] = {**DEFAULT_PROJECT["setup"], **shared.get("setup", {}), **mine.get("setup", {})}
     p["name"], p["repo"] = name, repo
@@ -1815,6 +1845,8 @@ def cmd_doctor() -> None:
         print(f"project {name}  ({p['repo']})")
         if run(["git", "-C", str(p["repo"]), "rev-parse", "--git-dir"]).returncode:
             warn("repo is not a git repository")
+        if problem := shared_config(p["repo"])[1]:
+            warn(f"{problem}: its services, setup and env are ignored until it is fixed")
         for rel in p["setup"].get("link", []) + p["setup"].get("clone", []) + p["setup"].get("copy", []):
             if not (p["repo"] / rel).exists():
                 warn(f"{rel} is missing in the main checkout (setup cannot provide it)")
@@ -1997,7 +2029,8 @@ def config_summary(p: dict) -> dict:
     the config came from (the repo's .grove.json, your own project.json, or Grove's starter guess) and,
     per service, how many of its ports are free for new features."""
     mine = read_json(project_conf(p["name"]), {})
-    source = (".grove.json" if (p["repo"] / ".grove.json").exists()
+    source = ("invalid" if shared_config(p["repo"])[1]
+              else ".grove.json" if (p["repo"] / ".grove.json").exists()
               else "starter" if mine.get("_help") == STARTER_HELP else "project.json")
     taken = listening() | {port for f in features() for port in ports(f).values()}
     rows = []

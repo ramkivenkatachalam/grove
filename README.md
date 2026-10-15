@@ -68,6 +68,14 @@ grove new csv-export                 # in or outside the repo; --project picks o
 The config is the repo's own **`.grove.json`** (commit it to share it with your team) merged under
 **`~/.grove/projects/<name>/project.json`** (yours; at least `{"repo": "~/code/my-repo"}`).
 
+- `.grove.json` is read from the main checkout's **working tree**, not from `origin/main`: teammates
+  get a change once they pull, and you can try an uncommitted edit locally before committing it.
+- The merge is **shallow**: a key in your `project.json` replaces the team's whole value. To change one
+  service, copy the whole `services` list. Only `setup` merges per sub-key, and even there your
+  `setup.copy` (or `link`, `clone`, `run`) replaces the team's list rather than adding to it.
+- A `.grove.json` that isn't valid JSON is ignored (you get your `project.json` and the defaults, so no
+  services) with a warning on every command, and `grove doctor` reports it.
+
 Without a `.grove.json`, the starter config is a guess from the repo: a `dev` script in a
 `package.json` becomes a web service, a `main.py` or `manage.py` an API; Python envs (`.venv`, `venv`)
 are linked into each worktree, `node_modules` cloned, untracked `.env*` files copied, and the base
