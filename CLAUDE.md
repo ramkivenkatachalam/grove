@@ -73,6 +73,5 @@ mod reports from inside each Claude session; tmux hosts every process (`grove_<f
 
 ## Open items
 
-- Teammates can't open the repo yet (private on a personal account): invite them or make it public.
 - Pitch video (`~/Desktop/Grove-pitch-music.mp4`): source and renderer were in a session scratchpad; if it
   needs more edits, move them into `docs/video/` first.
