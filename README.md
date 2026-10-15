@@ -149,6 +149,7 @@ to start a second Claude on a worktree that already has one.
 | `grove import [<repo>] [--yes]` | Register a repo and bring in its worktrees and recent conversations (above) |
 | `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations one at a time (above) |
 | `grove up\|down\|restart <name>` | Start, stop or restart a feature's services |
+| `grove fix <name>` | Repair only what is broken: reopen missing panels, start Claude if its pane is back at a prompt, restart services whose port is not listening. Safe any time; the app's Fix button (⌘⇧F) runs it |
 | `grove rename <name> <title>` | The title shown in Grove |
 | `grove done <name> [--keep\|--force]` · `grove clean [--yes]` | Close a feature: removes its worktree, branch and state (notes and retro go to the project's `archive/`); stops if it has uncommitted or unmerged work unless `--force`, `--keep` keeps worktree and branch · close every merged, clean one |
 | `grove doctor` | Check projects and features: files, deps, ports, env, labels |

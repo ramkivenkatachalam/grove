@@ -234,7 +234,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
 }
 
 // ---------- header (design A) ----------
-function Header({ f, pal, panels, openList, onToggle, repo }) {
+function Header({ f, pal, panels, openList, onToggle, onFix, fixing, repo }) {
   const st = f.status.state || 'offline'
   const d = f.status.details || {}
   const fill = st === 'offline' ? '#a8a8a8' : pal[st]
@@ -254,7 +254,11 @@ function Header({ f, pal, panels, openList, onToggle, repo }) {
         <span className="pill" style={{ background: fill }}>{STATE[st].glyph} {STATE[st].word}</span>
         {note && <span className="note">{note}</span>}
         <span className="grow" />
-        <span className="next"><b>NEXT ▸</b>{next}</span>
+        {st === 'offline'
+          ? <button className="btn primary fix" type="button" disabled={fixing} title="Start what stopped: panels, Claude, dead services (⌘⇧F)" onClick={onFix}>
+              {fixing ? 'Fixing…' : 'Fix'}<kbd>⌘⇧F</kbd>
+            </button>
+          : <span className="next"><b>NEXT ▸</b>{next}</span>}
       </div>
       <div className="hrow">
         <span className="recap">
@@ -998,6 +1002,15 @@ function App() {
     setCurrent(/^([a-z0-9][a-z0-9._-]*): \S+ \[/m.exec(r.stdout)?.[1] || name.toLowerCase())
     say(r.stdout.trim())
   }
+  // grove fix repairs only what is broken; panes it had to recreate need their terminals attached again
+  const [repairing, setRepairing] = useState(null)
+  const repair = async (feat) => {
+    setRepairing(feat.name)
+    const r = await hub.grove(['fix', feat.name])
+    setRepairing(null)
+    say((r.stdout || r.stderr).trim(), Boolean(r.code))
+    if (!r.code && !/: nothing to fix/.test(r.stdout)) setHosted((h) => ({ ...h, [feat.name]: undefined }))
+  }
   const rowMenu = async (feat) => {
     const choice = await hub.rowMenu({ name: feat.name, prUrl: feat.pr?.url, links: feat.links })
     if (choice === 'rename') setRenaming(feat.name)
@@ -1005,6 +1018,7 @@ function App() {
       const r = await hub.grove(['restart', feat.name])
       say((r.stdout || r.stderr).trim(), Boolean(r.code))
     }
+    if (choice === 'fix') repair(feat)
     if (choice?.startsWith('open:')) hub.open(choice.slice(5))
     if (choice === 'open-pr') hub.open(feat.pr.url)
     if (choice === 'reveal') hub.reveal(feat.path)
@@ -1029,7 +1043,7 @@ function App() {
 
   // menu accelerators and ⌘1…9
   const latest = useRef({})
-  latest.current = { f, features, toggle, open, zoom, setTab, review, sessionsNow: f ? hosted[f.name] : null }
+  latest.current = { f, features, toggle, open, zoom, setTab, review, repair, sessionsNow: f ? hosted[f.name] : null }
   useEffect(() => {
     hub.onMenu(async (action) => {
       const { f, toggle, open, zoom } = latest.current
@@ -1041,6 +1055,7 @@ function App() {
         const r = await hub.grove(['restart', f.name])
         say((r.stdout || r.stderr).trim(), Boolean(r.code))
       }
+      if (action === 'fix' && f) latest.current.repair(f)
       if (action.startsWith('toggle:')) toggle(action.slice(7))
       if (action === 'zoom') setZoom(zoom ? null : open[open.length - 1] || null)
     })
@@ -1126,7 +1141,8 @@ function App() {
         )}
         {f && (
           <>
-            <Header repo={state.repo || ''} f={f} pal={pal} panels={sessions ? Object.values(sessions).filter((s) => s.pane !== 'claude').map((s) => ({ name: s.pane, key: s.key })) : []} openList={open} onToggle={toggle} />
+            <Header repo={state.repo || ''} f={f} pal={pal} panels={sessions ? Object.values(sessions).filter((s) => s.pane !== 'claude').map((s) => ({ name: s.pane, key: s.key })) : []} openList={open} onToggle={toggle}
+              onFix={() => repair(f)} fixing={repairing === f.name} />
             <div className="work">
               <div className="left">
                 <TabBar tab={tab} onTab={setTab} />

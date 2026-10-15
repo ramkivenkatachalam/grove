@@ -84,7 +84,7 @@ function sessionLive(status) {
 function shownStatus(dir) {
   const status = readJSON(path.join(dir, 'status.json'), { state: 'offline' })
   if ((status.state || 'offline') === 'offline' || sessionLive(status)) return status
-  const details = { ...status.details, note: '', nextStep: 'start Claude in the feature (claude --continue)' }
+  const details = { ...status.details, note: '', nextStep: `grove fix ${path.basename(dir)}` }
   return { ...status, state: 'offline', message: 'no Claude session running', details }
 }
 
@@ -348,6 +348,7 @@ ipcMain.handle('row-menu', (e, feature) => new Promise((resolve) => {
   const items = [
     { label: 'Rename…', click: () => resolve('rename') },
     { label: 'Restart services', click: () => resolve('restart') },
+    { label: 'Fix (start what stopped)', click: () => resolve('fix') },
     { type: 'separator' },
     ...Object.entries(feature.links || {}).map(([svc, url]) => ({ label: `Open ${svc}  ${url}`, click: () => resolve('open:' + url) })),
     ...(feature.prUrl ? [{ label: 'Open pull request', click: () => resolve('open-pr') }] : []),
@@ -408,6 +409,7 @@ function buildMenu() {
         { label: 'Find Feature', accelerator: 'CmdOrCtrl+K', click: send('find') },
         { type: 'separator' },
         { label: 'Restart Services', accelerator: 'CmdOrCtrl+Shift+R', click: send('restart') },
+        { label: 'Fix Feature', accelerator: 'CmdOrCtrl+Shift+F', click: send('fix') },
       ],
     },
     { role: 'editMenu' },
