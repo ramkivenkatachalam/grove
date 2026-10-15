@@ -205,4 +205,4 @@ It is safe to re-run. Then restart running Claude sessions so they load the mod,
 
 ## License
 
-[0BSD](LICENSE) (BSD Zero Clause): use, copy, change and sell it, with or without credit. No warranty.
+[MIT](LICENSE): use, copy, change and sell it; keep the copyright notice. No warranty.
