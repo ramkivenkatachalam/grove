@@ -3,6 +3,7 @@
   "productName": "Grove",
   "version": "0.1.0",
   "private": true,
+  "license": "0BSD",
   "description": "Grove — one window for every feature: Claude, logs and a shell per worktree",
   "main": "main.js",
   "scripts": {

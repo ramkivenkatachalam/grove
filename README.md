@@ -202,3 +202,7 @@ It is safe to re-run. Then restart running Claude sessions so they load the mod,
 
 ⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘⇧I bring in existing work · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
 ⌘⇧R restart servers · right-click a feature for more · ⌥-drag selects text inside a terminal.
+
+## License
+
+[0BSD](LICENSE) (BSD Zero Clause): use, copy, change and sell it, with or without credit. No warranty.

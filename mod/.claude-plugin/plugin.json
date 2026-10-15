@@ -1,1 +1,1 @@
-{ "name": "grove", "version": "0.1.0", "description": "Lists every feature session (one tmux window each), alerts when one needs you, and switches between them", "types": "./types/index.d.ts" }
+{ "name": "grove", "version": "0.1.0", "license": "0BSD", "description": "Lists every feature session (one tmux window each), alerts when one needs you, and switches between them", "types": "./types/index.d.ts" }
