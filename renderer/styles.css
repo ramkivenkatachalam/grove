@@ -194,6 +194,8 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .setup summary b { color: var(--accent); font-size: 13px; }
 .setup summary:focus-visible { outline: 2px solid #ffffff; outline-offset: 2px; }
 .setup .facts-list { margin: 8px 0; }
+.setup-offer { display: flex; gap: 12px; align-items: center; }
+.setup-offer .btn { flex: none; }
 .sheet-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
 .sheet-actions .btn { padding: 6px 12px; }
 .sheet-error { color: #ff9b9b; font-size: 12px; }

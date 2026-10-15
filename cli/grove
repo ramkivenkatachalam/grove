@@ -40,6 +40,10 @@ per feature, for any project described by a project config (see `grove project`)
   grove project add <repo> [--name N]    register a repo (reads its .grove.json, or writes a starter)
   grove project default <name>           the project `grove new` uses outside any project directory
   grove project show <name>              the merged config
+  grove project setup <name> [--draft | --start [-p BRIEF]] [--force]
+                         a Claude session reads the repo and fills in your project.json (services,
+                         env port rewrites, setup, checks, agentNotes); only for repos without a
+                         .grove.json unless --force
 
   grove host <name>         (app) every pane in its own tmux session; prints JSON
   grove ui [app|tmux]       which front end new features open in
@@ -123,22 +127,25 @@ def expand(path: str) -> Path:
 #
 # A project config says how to grow a feature from a repo. It is the repo's own `.grove.json`
 # (shareable, committed by the team) merged under ~/.grove/projects/<name>/project.json
-# (yours: at least {"repo": …}; anything here overrides the repo's file).
-#
-#   repo          the main checkout                        worktrees  where worktrees go (default: in each
-#                                                                     feature's folder under ~/.grove)
-#   base          start point for new branches (origin/main)   branchPrefix  "{user}/" by default
-#   setup         {"link": [...], "clone": [...], "copy": [...], "run": [...]}, paths relative to the repo:
-#                 link = symlink to the main checkout's copy; clone = APFS copy-on-write clone;
-#                 copy = copy if missing (env files); run = shell commands in the new worktree
-#   services      [{"name", "dir", "run", "ports": [lo, hi], "reserved": [...], "key", "hint", "open"}]
-#                 run / hint / open may use {port}, {<service>}, {name}, {path}
-#   env           [{"file", "port": {"KEY": "<service>"}, "set": {"KEY": "value with {fe}"}}]:
-#                 port = rewrite localhost:NNNN in that line; set = the whole value (added if missing)
-#   labels        [{"name", "file", "key", "rules": [[regex, label], ...], "warn": [labels]}]
-#   checks        what the agent should run before finishing      agentNotes  extra lines for the agent
-#   panels        extra panels: [{"name", "key", "run", "dir"}]
-#   ghUser        the gh account for this repo's PRs (default: whichever signed-in account can see it)
+# (yours: at least {"repo": …}; anything here overrides the repo's file). PROJECT_SCHEMA lists the keys;
+# the `grove project setup` brief hands it to Claude as is.
+
+PROJECT_SCHEMA = """\
+  repo          the main checkout                        worktrees  where worktrees go (default: in each
+                                                                    feature's folder under ~/.grove)
+  base          start point for new branches (origin/main)   branchPrefix  "{user}/" by default
+  setup         {"link": [...], "clone": [...], "copy": [...], "run": [...]}, paths relative to the repo:
+                link = symlink to the main checkout's copy; clone = APFS copy-on-write clone;
+                copy = copy if missing (env files); run = shell commands in the new worktree
+  services      [{"name", "dir", "run", "ports": [lo, hi], "reserved": [...], "key", "hint", "open"}]
+                run / hint / open may use {port}, {<service>}, {name}, {path}
+  env           [{"file", "port": {"KEY": "<service>"}, "set": {"KEY": "value with {fe}"}}]:
+                port = rewrite localhost:NNNN in that line; set = the whole value (added if missing)
+  labels        [{"name", "file", "key", "rules": [[regex, label], ...], "warn": [labels]}]
+  checks        what the agent should run before finishing      agentNotes  extra lines for the agent
+  panels        extra panels: [{"name", "key", "run", "dir"}]
+  ghUser        the gh account for this repo's PRs (default: whichever signed-in account can see it)
+"""
 
 DEFAULT_PROJECT = {
     "base": "origin/main",
@@ -899,6 +906,9 @@ def cmd_new(args: list[str]) -> None:
     rest = []
     it = iter(args)
     for a in it:
+        if a in ("-h", "--help"):
+            print("grove new <name|TICKET-123> [--project P] [--title T] [--parent NAME] [--base REF] [-p PROMPT]")
+            return
         if a in ("-p", "--prompt"):
             prompt = " ".join(it) or None  # the rest of the line, quoted or not
         elif a == "--base":
@@ -1479,15 +1489,16 @@ def cmd_agent(name: str) -> None:
             input()
         except (EOFError, KeyboardInterrupt):
             os.execvp(os.environ.get("SHELL", "zsh"), [os.environ.get("SHELL", "zsh")])
+    extra = [a for d in f.get("addDirs", []) for a in ("--add-dir", d)]  # a helper reading the repo
     brief = feature_dir(f) / "brief.md"
     if brief.exists():
         text = brief.read_text()
         brief.rename(brief.with_suffix(".sent.md"))
-        os.execvp("claude", ["claude", text])
+        os.execvp("claude", ["claude", *extra, text])
     transcripts = HOME / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", f["path"])
     if any(transcripts.glob("*.jsonl")):
-        os.execvp("claude", ["claude", "--continue"])
-    os.execvp("claude", ["claude"])
+        os.execvp("claude", ["claude", *extra, "--continue"])
+    os.execvp("claude", ["claude", *extra])
 
 
 def cmd_serve(svc: str, name: str) -> None:
@@ -1935,6 +1946,8 @@ def add_project(repo: Path, name: str | None = None, out=sys.stdout) -> str | No
     for key in ("services", "setup"):
         if key in mine:
             print(f"  {key}: {json.dumps(mine[key])}", file=out)
+    if "_help" in mine:
+        print(f"  that is a quick guess from file checks; for a better one: grove project setup {name}", file=out)
     return name
 
 
@@ -1993,6 +2006,7 @@ def config_summary(p: dict) -> dict:
         free = sum(1 for port in range(lo, hi + 1) if port not in taken and port not in set(s.get("reserved", [])))
         rows.append({"name": s["name"], "dir": s.get("dir", ""), "run": s.get("run", ""), "ports": [lo, hi], "free": free})
     return {"source": source, "file": str(project_conf(p["name"])), "base": p.get("base"), "services": rows,
+            "setupWithClaude": source != ".grove.json",
             "setup": {k: v for k, v in p["setup"].items() if v}}
 
 
@@ -2110,6 +2124,32 @@ decide. Finish with one line per item: in Grove, or not and why.
 """
 
 
+def helper_name(p: dict, prefix: str) -> str:
+    return re.sub(r"[^a-z0-9._-]+", "-", f"{prefix}-{p['name']}")[:41].strip("-.")
+
+
+def start_helper(p: dict, prefix: str, helper: str, title: str, brief: str, add_dirs: list[str] = ()) -> bool:
+    """Open a helper session row (one per project and kind: it keeps its conversation) briefed with
+    `brief`, working from its own scratch folder. False when it was already open (it gets the focus)."""
+    name = helper_name(p, prefix)
+    if registered(name):
+        print(f"{name}: already open")
+        write_json(HUB / "focus.json", {"name": name, "at": time.time()})
+        return False
+    home = PROJECTS / p["name"] / name
+    scratch = home / "worktree"  # named like a worktree so the app's file watcher ignores it
+    scratch.mkdir(parents=True, exist_ok=True)
+    f = {"name": name, "kind": "session", "helper": helper, "project": p["name"], "path": str(scratch),
+         "branch": "", "ports": {}, "title": title, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if add_dirs:
+        f["addDirs"] = [str(d) for d in add_dirs]
+    save(f)
+    (home / "brief.md").write_text(brief)
+    open_window(f)
+    write_json(HUB / "focus.json", {"name": name, "at": time.time()})
+    return True
+
+
 def cmd_fix_import(args: list[str]) -> None:
     """--record JSON  keep what failed ([{path|id, branch, title, error}])
     --draft [--json]  the brief Claude would get, and the failures (fixable or not, and why)
@@ -2138,24 +2178,90 @@ def cmd_fix_import(args: list[str]) -> None:
         brief = " ".join(args[args.index("-p") + 1:]) if "-p" in args else (fix_brief(p, rows) if rows else "")
         if not brief.strip():
             die("nothing to fix")
-        name = re.sub(r"[^a-z0-9._-]+", "-", f"fix-import-{p['name']}")[:41].strip("-.")
-        if registered(name):
-            print(f"{name}: already open")  # one fixer per project: it keeps its conversation
-            write_json(HUB / "focus.json", {"name": name, "at": time.time()})
-            return
-        home = PROJECTS / p["name"] / name
-        scratch = home / "worktree"  # named like a worktree so the app's file watcher ignores it
-        scratch.mkdir(parents=True, exist_ok=True)
-        f = {"name": name, "kind": "session", "helper": "import", "project": p["name"], "path": str(scratch),
-             "branch": "", "ports": {}, "title": f"Fix import: {len(rows) or 'help'} item{'' if len(rows) == 1 else 's'}",
-             "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        save(f)
-        (home / "brief.md").write_text(brief)
-        open_window(f)
-        write_json(HUB / "focus.json", {"name": name, "at": time.time()})
-        print(f"{name}: Claude is briefed to bring in {len(rows)} item(s)")
+        title = f"Fix import: {len(rows) or 'help'} item{'' if len(rows) == 1 else 's'}"
+        if start_helper(p, "fix-import", "import", title, brief):
+            print(f"{helper_name(p, 'fix-import')}: Claude is briefed to bring in {len(rows)} item(s)")
     else:
         die("fix-import [--project P] --record JSON | --draft [--json] | --forget KEY | --start [-p BRIEF]")
+
+
+# ---------- a Claude session that sets a project up properly ----------
+#
+# `grove project add` guesses a repo's config from a few file checks. `grove project setup` hands the
+# repo to a Claude session instead, briefed to fill in the user's project.json from what it reads (dev
+# servers, ports, env files that name other services' ports, setup, checks). Optional, never automatic.
+
+def setup_brief(p: dict) -> str:
+    conf = project_conf(p["name"])
+    mine = read_json(conf, {})
+    doctor = run([BIN, "doctor"]).stdout.strip().splitlines()
+    return f"""# Set up {p['name']} for Grove
+
+Grove runs one Claude Code session per git worktree, each feature with its own branch, its own ports
+and its own dev servers. To do that for {p['repo']} it needs a project config. Right now it has a quick
+guess from file checks in {conf}:
+
+```json
+{json.dumps(mine, indent=2)}
+```
+
+Read the repo and replace that guess with a config that really runs it.
+
+## What to find out
+- **services**: every dev server a developer runs (web front end, API, workers with a port), its
+  folder, the command (`exec …`, taking `{{port}}`), and a port range per service that keeps clear of
+  the ports people use in the main checkout (put those in `reserved`). Look at package.json scripts,
+  Procfile, Makefile, docker-compose, manage.py / uvicorn / gunicorn entry points, and the README.
+- **env**: env files (.env, .env.local, …) whose values point at another service's port
+  (`http://localhost:8000`, API base URLs, CORS origins, OAuth callbacks). Each worktree must point at
+  its own ports, or two features' front ends will call the same back end. Use `port` to rewrite
+  `localhost:NNNN` and `set` for whole values.
+- **setup**: what a new worktree needs before it runs: venvs to link, node_modules to clone, untracked
+  env files to copy, and any commands (codegen, migrations) to run.
+- **checks**: the tests and linters an agent should run before finishing.
+- **agentNotes**: a few lines a new agent in this repo should know (layout, gotchas, how to run things).
+- **labels**, **panels**: only if the repo clearly calls for them.
+
+The keys Grove reads:
+```
+{PROJECT_SCHEMA}```
+
+## Rules
+- Write only {conf}. Keep `"repo"`. Delete the `"_help"` key once the file is no longer a guess.
+- Don't edit, create or commit the repo's `.grove.json`, and don't change code in the repo. If a
+  shared `.grove.json` would help the team, suggest it and ask me first.
+- Don't start, stop or create features, and don't run the dev servers yourself: ask me first.
+
+## Done when
+`{BIN} project show {p['name']}` prints the config you meant and `{BIN} doctor` reports no problem
+with the project. Finish with a short table: each service with its folder, command and ports; each env
+rewrite; and anything you were unsure of.
+
+`{BIN} doctor` now:
+```
+{chr(10).join(doctor[-40:])}
+```
+"""
+
+
+def cmd_project_setup(args: list[str]) -> None:
+    """[name] [--draft [--json]] | --start [-p BRIEF]  [--force]: draft the brief, or open the session"""
+    flags = {"-p"}
+    names = [a for i, a in enumerate(args) if not a.startswith("-") and (i == 0 or args[i - 1] not in flags)
+             and "-p" not in args[:i]]
+    p = project(names[0] if names else project_here() or default_project())
+    if (p["repo"] / ".grove.json").exists() and "--force" not in args:
+        die(f"{p['name']} has a .grove.json: the team's config. Your own overrides go in {project_conf(p['name'])}"
+            f" (grove project setup {p['name']} --force to have Claude look anyway)")
+    if "--start" in args:
+        brief = " ".join(args[args.index("-p") + 1:]) if "-p" in args else setup_brief(p)
+        if not brief.strip():
+            die("an empty brief")
+        if start_helper(p, "setup", "setup", f"Set up {p['name']}", brief, [p["repo"]]):
+            print(f"{helper_name(p, 'setup')}: Claude is briefed to set up {p['name']}")
+    else:
+        brief = setup_brief(p)
+        print(json.dumps({"project": p["name"], "brief": brief}) if "--json" in args else brief)
 
 
 def cmd_project(rest: list[str]) -> None:
@@ -2184,8 +2290,10 @@ def cmd_project(rest: list[str]) -> None:
     elif sub == "show":
         p = project(rest[1] if len(rest) > 1 else default_project())
         print(json.dumps({k: str(v) if isinstance(v, Path) else v for k, v in p.items()}, indent=2))
+    elif sub == "setup":
+        cmd_project_setup(rest[1:])
     else:
-        die("project ls | add <repo> [--name N] | default <name> | show [name]")
+        die("project ls | add <repo> [--name N] | default <name> | show [name] | setup [name] [--draft|--start]")
 
 
 def cmd_statusline() -> None:
