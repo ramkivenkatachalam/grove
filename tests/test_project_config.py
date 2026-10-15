@@ -168,6 +168,13 @@ class BrokenSharedConfig(ProjectCase):
         self.assertEqual(grove.config_summary(p)["source"], "invalid")
 
 
+class GrovesOwnConfig(unittest.TestCase):
+    def test_parses_and_clones_node_modules(self):
+        shared, problem = grove.shared_config(CLI.parent.parent)
+        self.assertIsNone(problem)
+        self.assertIn("node_modules", shared["setup"]["clone"])
+
+
 class ProjectAdd(unittest.TestCase):
     def test_writes_only_repo_when_grove_json_exists(self):
         repo = ROOT / "repos" / "with-shared"
