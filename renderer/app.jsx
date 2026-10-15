@@ -644,7 +644,7 @@ function SetupSummary({ config, project }) {
       <summary>
         <b>How Grove will run them</b>
         <span>{svc.length ? `${svc.map((x) => x.name).join(' and ')}, each on its own port` : 'a Claude session and a shell (no dev servers found)'}
-          {' · '}{{ '.grove.json': "from the repo's .grove.json", 'project.json': 'from your project.json', starter: 'guessed from the repo' }[config.source]}</span>
+          {' · '}{{ '.grove.json': "from the repo's .grove.json", 'project.json': 'from your project.json', starter: 'guessed from the repo', invalid: "the repo's .grove.json is broken (not a JSON object), so it is ignored" }[config.source]}</span>
       </summary>
       <dl className="facts-list">
         {svc.map((x) => (

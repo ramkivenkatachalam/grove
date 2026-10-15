@@ -27,7 +27,7 @@ mod reports from inside each Claude session; tmux hosts every process (`grove_<f
 
 - **Edit the source here** — the live locations are symlinks, so CLI and mod edits are live immediately.
   Running Claude sessions do *not* hot-reload the mod: restart them (`claude --continue`) to pick changes up.
-- **CLI**: stdlib only, no third-party imports. `python3 -m py_compile cli/grove` after edits. Every command
+- **CLI**: stdlib only, no third-party imports. `python3 -m py_compile cli/grove` and `python3 -m unittest discover tests` after edits. Every command
   must stay safe to re-run (host, adopt, provision are idempotent).
 - **Mod** (`mod/hooks/register.tsx`), the function-hooks API:
   - A helper that takes `$` must be a top-level function declaration (the validator rejects closures).
