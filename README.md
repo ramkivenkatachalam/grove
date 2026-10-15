@@ -55,8 +55,10 @@ code and branches stay as they are. ([More on bringing in work](#bringing-in-wor
 - **Dock badge** with the number of features waiting on you, plus desktop notifications.
 
 Quitting Grove stops nothing: every terminal is a tmux session (`grove_<feature>_<pane>`) that keeps running.
-tmux keeps them in memory, though, so a reboot ends them and the features show *offline*;
-`grove fix <name>` (or the Fix button, ⌘⇧F) reopens the panels and continues the Claude conversation.
+tmux keeps them in memory, though, so a reboot ends them and the features show *offline*. Opening a
+feature in Grove brings it back: Claude continues its latest conversation and the dev servers restart on
+the same ports. Features you haven't opened stay offline, and a turn Claude was in the middle of is not
+redone. From a terminal, `grove fix <name>` (the Fix button, ⌘⇧F) does the same.
 
 ## Projects
 
