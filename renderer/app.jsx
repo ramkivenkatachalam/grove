@@ -205,7 +205,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
                 <span className="glyph" style={{ color: `var(--${st === 'offline' ? 'text-3' : st})` }} aria-label={STATE[st].word}>{STATE[st].glyph}</span>
                 <span className="text">
                   <div className="title">{f.title}</div>
-                  <div className="sub">{where || `${f.parent ? `↳ ${f.parent} · ` : ''}⎇ ${f.branch.replace(/^[^/]+\//, '')}${prBit}`}</div>
+                  <div className="sub">{st === 'offline' && 'offline · '}{where || `${f.parent ? `↳ ${f.parent} · ` : ''}⎇ ${f.branch.replace(/^[^/]+\//, '')}${prBit}`}</div>
                 </span>
                 {i < 9 && <span className="num" aria-hidden="true">⌘{i + 1}</span>}
               </button>

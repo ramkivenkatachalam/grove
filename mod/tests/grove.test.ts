@@ -40,6 +40,9 @@ function host(on: On, env: Record<string, string> = {}) {
   })
   on('process.run', ($, e) => {
     commands.push([...e.argv])
+    if (e.argv[0] === 'sh') {
+      return { value: { exitCode: 0, stdout: '4242\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
 
     const stdout = e.argv[1] === 'findings' ? 'The review bots left 1 comment(s)\nFor each one:\n- fix it' : `ran ${e.argv.slice(1).join(' ')}`
 
@@ -290,4 +293,12 @@ test('a closed feature gets no status file back', async ($, on) => {
   }
   await $.classic.Notification({ message: 'Claude needs permission to use Bash', notification_type: 'permission_prompt' })
   expect(fake.files.has(`${HUB}/projects/acme/flux/status.json`)).toBe(false)
+})
+
+test('the status names the Claude process, so a session that is gone shows offline', async ($, on) => {
+  const fake = host(on)
+
+  await $.session.start({ cwd: WT, surface: null, isInteractive: true })
+  expect(fake.status().pid).toBe(4242)
+  expect(fake.commands.some(argv => argv[0] === 'sh' && argv[2]?.includes('ps -o comm='))).toBe(true)
 })

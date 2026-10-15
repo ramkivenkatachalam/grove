@@ -65,6 +65,29 @@ function defaultProject() {
   return names.includes(chosen) ? chosen : names[0] || null
 }
 
+// whether the Claude session that wrote a status still runs, without starting a process (the app polls):
+// its pid (the mod writes it) must be alive, and nothing written before the last boot counts. A status
+// without a pid (a session on a mod from before pids) is trusted until the next reboot. As session_live in cli/grove.
+function sessionLive(status) {
+  if ((status.updatedAt || 0) < Date.now() - os.uptime() * 1000) return false
+  if (!Number.isInteger(status.pid) || status.pid <= 1) return true
+  try {
+    process.kill(status.pid, 0)
+    return true
+  } catch (err) {
+    return err.code === 'EPERM'
+  }
+}
+
+// offline once no live Claude session is left to update the status (a reboot, a crash, a killed tmux
+// server); the last question or permission prompt no longer stands, the recap does
+function shownStatus(dir) {
+  const status = readJSON(path.join(dir, 'status.json'), { state: 'offline' })
+  if ((status.state || 'offline') === 'offline' || sessionLive(status)) return status
+  const details = { ...status.details, note: '', nextStep: 'start Claude in the feature (claude --continue)' }
+  return { ...status, state: 'offline', message: 'no Claude session running', details }
+}
+
 function allFeatures() {
   const prs = (readJSON(path.join(HUB, 'prs.json'), {}).byBranch) || {}
   const dirs = folders(PROJECTS).flatMap((p) => folders(path.join(PROJECTS, p)).map((name) => path.join(PROJECTS, p, name)))
@@ -75,7 +98,7 @@ function allFeatures() {
       ...f,
       project: f.project || path.basename(path.dirname(dir)),
       title: f.title || f.name,
-      status: readJSON(path.join(dir, 'status.json'), { state: 'offline' }),
+      status: shownStatus(dir),
       recap: readJSON(path.join(dir, 'recap.json'), null), // grove recap: goal, done, now, next…
       pr: prs[f.branch] || null,
     }))
