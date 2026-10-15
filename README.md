@@ -6,6 +6,40 @@ side and tells you which one needs you.
 
 ![Grove on a demo project: the feature sidebar, the header (state, recap, next step, PR and CI, stage), Claude in the main panel, a service log and a shell on the right](docs/screenshot.png)
 
+## Get started
+
+Three steps. Details for each are further down.
+
+**1. Install** (a Mac with Homebrew and Claude Code, signed in):
+
+```sh
+gh repo clone ramkivenkatachalam/grove ~/grove && ~/grove/install.sh --app
+```
+
+Then open **Grove** from Applications, and restart any Claude sessions you already have open so they
+load Grove. ([What the installer does](#install))
+
+**2. Add your project.** In the app: **Add project** (⌘⇧O) and pick the repo (its main checkout or any
+of its worktrees). From a terminal: `grove project add ~/code/my-repo`. Grove guesses your dev servers,
+ports and setup from the repo, or reads them from its [`.grove.json`](#projects). Without a
+`.grove.json`, that guess comes from a few file checks: **Set up with Claude** on the review sheet (or
+`grove project setup <name>`) has a Claude session read the repo and write a better one.
+
+**3. Bring in what you're doing, or start something new:**
+
+| You want to… | In the app | In a terminal |
+|---|---|---|
+| **Keep going on work already in progress** (worktrees, Claude conversations from the last 72 h) | Right after Add project, a review sheet lists them: tick what you want, **Bring in** (⌘↩). Later: ⌘⇧I | `grove import ~/code/my-repo` to see the list, then `--yes` to bring it all in |
+| **Start a new feature** | **+ New** (⌘N): a name or ticket (`TICKET-123`), plus an optional task for Claude | `grove new csv-export -p "add CSV export to the report page"` |
+| **Split work off a running session** | Ask Claude to *spin off a feature for …*; it writes the handover brief | `/feature new <name>` inside any Claude session |
+
+Each feature gets its own worktree, branch, ports, dev servers and Claude session, and your existing
+code and branches stay as they are. ([More on bringing in work](#bringing-in-work-that-already-exists))
+
+**Day to day:** the sidebar shows which feature needs you (❗ needs you · ✓ your turn · ⏳ working);
+⌘1–9 jumps to one. `grove up <name>` starts a feature's servers. When its PR merges, `grove done <name>`
+(or `grove clean` for every merged one) removes it. If something looks wrong, run `grove doctor`.
+
 ## What you get
 
 - **One window per project**, its name at the top of the sidebar; ⇄ opens another project and shows
@@ -21,52 +55,6 @@ side and tells you which one needs you.
 - **Dock badge** with the number of features waiting on you, plus desktop notifications.
 
 Quitting Grove stops nothing: every terminal is a tmux session (`grove_<feature>_<pane>`) that keeps running.
-
-## How it fits together
-
-```
- ┌──────────── Grove.app (Electron) ─────────────┐
- │ sidebar · header · Claude panel · log panels  │   one window per project
- └───────┬──────────────────────────┬────────────┘
-   reads state files          attaches terminals
-         │                          │
- ~/.grove/                     tmux sessions  grove_<feature>_<pane>
-   projects/<p>/<feature>/      (claude · shell · services …)
-     feature.json status.json       ▲            ▲
-         ▲      ▲                   │            │
-   writes│      │writes        starts│            │runs inside
-   ┌─────┴──┐ ┌─┴────────────────────┴──┐    ┌───┴─────────────┐
-   │ grove  │ │ Claude Code mod          │    │ Claude Code     │
-   │  CLI   │ │ (loaded by every session)│◀───│ sessions        │
-   └────────┘ └──────────────────────────┘    └─────────────────┘
-```
-
-The app only draws; the CLI does the work; the mod reports from inside each Claude session; tmux
-hosts every process, so the app can come and go.
-
-
-| Piece | Where | Role |
-|---|---|---|
-| App | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | Electron + React + xterm.js. Reads state from `~/.grove`, attaches terminals to tmux sessions through a tiny Python pty bridge (no native modules) |
-| `grove` CLI | `cli/grove` | Python, stdlib only. Projects, worktrees, per-service port allocation, env rewriting, dev servers, PR/CI sync, review-bot findings, ticket briefs, cleanup, `grove doctor` |
-| Claude Code mod | `mod/` | Function hooks loaded by every Claude Code session: publishes each session's state, recap and next step, notifications, the `new_feature` tool, `/feature` commands |
-| tmux | `grove_<feature>_<pane>` sessions | Hosts every Claude, service and shell process; the app attaches to them and nothing stops when it quits |
-| tmux config | `tmux/grove.tmux.conf` | The terminal-only front end (header in tmux's status line), used with `grove ui tmux` |
-
-State lives in `~/.grove/`, one folder per project and per feature:
-
-```
-~/.grove/projects/<project>/project.json             your config for the project
-~/.grove/projects/<project>/<feature>/feature.json   registry entry
-                                     /status.json    session state, written by the mod
-                                     /brief.md       the task, until the agent picks it up
-                                     /recap.json     the Summary tab's recap (grove recap)
-                                     /notes.md  retro.md   the Summary tab's Scratchpad and Retro
-                                     /worktree/      the feature's git worktree
-```
-
-plus `prs.json`, `theme.json`, `config.json` at the top. A hub from an older version moves over with
-`grove migrate` (existing worktrees stay put; their feature folders link to them).
 
 ## Projects
 
@@ -92,6 +80,14 @@ Without a `.grove.json`, the starter config is a guess from the repo: a `dev` sc
 `package.json` becomes a web service, a `main.py` or `manage.py` an API; Python envs (`.venv`, `venv`)
 are linked into each worktree, `node_modules` cloned, untracked `.env*` files copied, and the base
 branch follows `origin/HEAD`. Check it with `grove project show <name>`.
+
+For a better config, let Claude write it: **Set up with Claude** on the review sheet after Add project,
+or `grove project setup <name>` (`--draft` prints the brief, `--start` opens the session). A **Set up**
+session under Sessions reads the repo and fills in your `project.json`: every dev server and its ports,
+`env` rewrites so each feature's front end calls its own back end, setup, `checks` and `agentNotes`. It
+writes only your `project.json`, never the repo or its `.grove.json` (it asks before suggesting one),
+and finishes by checking `grove project show` and `grove doctor`. It is offered only when the repo has
+no `.grove.json` (`--force` to ask anyway), and never starts on its own.
 
 | Key | What it does |
 |---|---|
@@ -157,10 +153,11 @@ to start a second Claude on a worktree that already has one.
 | `grove import [<repo>] [--yes]` | Register a repo and bring in its worktrees and recent conversations (above) |
 | `grove adopt …` · `grove sessions` | Bring in existing worktrees or conversations one at a time (above) |
 | `grove up\|down\|restart <name>` | Start, stop or restart a feature's services |
+| `grove fix <name>` | Repair only what is broken: reopen missing panels, start Claude if its pane is back at a prompt, restart services whose port is not listening. Safe any time; the app's Fix button (⌘⇧F) runs it |
 | `grove rename <name> <title>` | The title shown in Grove |
 | `grove done <name> [--keep\|--force]` · `grove clean [--yes]` | Close a feature: removes its worktree, branch and state (notes and retro go to the project's `archive/`); stops if it has uncommitted or unmerged work unless `--force`, `--keep` keeps worktree and branch · close every merged, clean one |
 | `grove doctor` | Check projects and features: files, deps, ports, env, labels |
-| `grove project add\|ls\|default\|show` | Manage projects |
+| `grove project add\|ls\|default\|show\|setup` | Manage projects; `setup` has Claude write a project's config |
 | `grove pr` · `grove findings <name>` | Refresh PR/CI · list unanswered review-bot findings |
 | `grove retro <name>` | Drafts the feature's retro (what went well, what didn't, what to try next time with an agent) into its `retro.md`, from its conversations, recap and git. The Summary tab's Retro section has the same button |
 | `grove send <name> <text…>` | Types text into a feature's Claude session as one message (starts the session if needed). The Summary tab's Scratchpad sends a selection this way |
@@ -188,11 +185,57 @@ so macOS opens it without a security prompt. Then open **Grove** from Applicatio
    line, if you have none) to `~/.claude/settings.json`, keeping a backup
 4. with `--app`, builds Grove.app into `/Applications` (quitting and reopening Grove if it is running;
    agents and servers keep running)
-5. for each repo you name, runs `grove import` as a dry run (below)
+5. for each repo you name, runs `grove import` as a dry run ([above](#bringing-in-work-that-already-exists))
 
 To update: `cd ~/grove && git pull && ./install.sh --app`.
 
 It is safe to re-run. Then restart running Claude sessions so they load the mod, and run `grove doctor`.
+
+## How it fits together
+
+```
+ ┌──────────── Grove.app (Electron) ─────────────┐
+ │ sidebar · header · Claude panel · log panels  │   one window per project
+ └───────┬──────────────────────────┬────────────┘
+   reads state files          attaches terminals
+         │                          │
+ ~/.grove/                     tmux sessions  grove_<feature>_<pane>
+   projects/<p>/<feature>/      (claude · shell · services …)
+     feature.json status.json       ▲            ▲
+         ▲      ▲                   │            │
+   writes│      │writes        starts│            │runs inside
+   ┌─────┴──┐ ┌─┴────────────────────┴──┐    ┌───┴─────────────┐
+   │ grove  │ │ Claude Code mod          │    │ Claude Code     │
+   │  CLI   │ │ (loaded by every session)│◀───│ sessions        │
+   └────────┘ └──────────────────────────┘    └─────────────────┘
+```
+
+The app only draws; the CLI does the work; the mod reports from inside each Claude session; tmux
+hosts every process, so the app can come and go.
+
+
+| Piece | Where | Role |
+|---|---|---|
+| App | `main.js`, `preload.js`, `ptybridge.py`, `renderer/` | Electron + React + xterm.js. Reads state from `~/.grove`, attaches terminals to tmux sessions through a tiny Python pty bridge (no native modules) |
+| `grove` CLI | `cli/grove` | Python, stdlib only. Projects, worktrees, per-service port allocation, env rewriting, dev servers, PR/CI sync, review-bot findings, ticket briefs, cleanup, `grove doctor` |
+| Claude Code mod | `mod/` | Function hooks loaded by every Claude Code session: publishes each session's state, recap and next step, notifications, the `new_feature` tool, `/feature` commands |
+| tmux | `grove_<feature>_<pane>` sessions | Hosts every Claude, service and shell process; the app attaches to them and nothing stops when it quits |
+| tmux config | `tmux/grove.tmux.conf` | The terminal-only front end (header in tmux's status line), used with `grove ui tmux` |
+
+State lives in `~/.grove/`, one folder per project and per feature:
+
+```
+~/.grove/projects/<project>/project.json             your config for the project
+~/.grove/projects/<project>/<feature>/feature.json   registry entry
+                                     /status.json    session state, written by the mod
+                                     /brief.md       the task, until the agent picks it up
+                                     /recap.json     the Summary tab's recap (grove recap)
+                                     /notes.md  retro.md   the Summary tab's Scratchpad and Retro
+                                     /worktree/      the feature's git worktree
+```
+
+plus `prs.json`, `theme.json`, `config.json` at the top. A hub from an older version moves over with
+`grove migrate` (existing worktrees stay put; their feature folders link to them).
 
 ## Develop
 
@@ -210,3 +253,7 @@ It is safe to re-run. Then restart running Claude sessions so they load the mod,
 
 ⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘⇧I bring in existing work · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
 ⌘⇧R restart servers · right-click a feature for more · ⌥-drag selects text inside a terminal.
+
+## License
+
+[MIT](LICENSE): use, copy, change and sell it; keep the copyright notice. No warranty.
