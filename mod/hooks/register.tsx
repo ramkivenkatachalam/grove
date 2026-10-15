@@ -116,6 +116,8 @@ async function notify($: EngineInterface, title: string, message: string) {
   ])
 }
 
+const projectDirOf = (one: Registered): string => one.dir.slice(0, one.dir.lastIndexOf('/'))
+
 // the hub keeps one folder per project, and in it one folder per feature with its feature.json
 async function readRegistry($: EngineInterface): Promise<Registered[]> {
   const projects = await $.fs.list(`${hub}/projects`).catch(() => [])
@@ -141,10 +143,10 @@ async function readRegistry($: EngineInterface): Promise<Registered[]> {
   return rows.filter((row): row is Registered => row !== undefined)
 }
 
-// the gh cache is shared: whichever session finds it stale refreshes it
-async function syncPrs($: EngineInterface, cache: PrCache) {
+// the gh caches are shared: whichever session finds one stale refreshes them (grove pr skips fresh ones)
+async function syncPrs($: EngineInterface, fetchedAt: number) {
   const now = await $.clock.now()
-  if (isSyncing || now - (cache.fetchedAt ?? 0) * 1000 < PR_TTL_MS) {
+  if (isSyncing || now - fetchedAt * 1000 < PR_TTL_MS) {
     return
   }
   isSyncing = true
@@ -172,14 +174,17 @@ async function watchMyPr($: EngineInterface, pr: Pr | null) {
 
 async function refresh($: EngineInterface) {
   const registry = await readRegistry($)
-  const cache = (await $.fs.read(`${hub}/prs.json`).then(parse<PrCache>, () => undefined)) ?? {}
-  void syncPrs($, cache)
+  // each project's PRs sit beside its features, by branch: branch names are only unique within one repo
+  const projectDirs = [...new Set(registry.map(projectDirOf))]
+  const caches = new Map(await Promise.all(projectDirs.map(async dir =>
+    [dir, (await $.fs.read(`${dir}/prs.json`).then(parse<PrCache>, () => undefined)) ?? {}] as const)))
+  void syncPrs($, Math.min(...[...caches.values()].map(cache => cache.fetchedAt ?? 0)))
   const rows: Feature[] = await Promise.all(
     registry.map(async (one): Promise<Feature> => {
       const status = await $.fs
         .read(`${one.dir}/status.json`)
         .then(parse<Status>, () => undefined)
-      const pr = cache.byBranch?.[one.branch]
+      const pr = caches.get(projectDirOf(one))?.byBranch?.[one.branch]
 
       return {
         name: one.name,

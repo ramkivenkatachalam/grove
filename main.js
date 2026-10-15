@@ -89,7 +89,8 @@ function shownStatus(dir) {
 }
 
 function allFeatures() {
-  const prs = (readJSON(path.join(HUB, 'prs.json'), {}).byBranch) || {}
+  // each project's PRs, by branch (branch names are only unique within one repo)
+  const prs = Object.fromEntries(folders(PROJECTS).map((p) => [p, readJSON(path.join(PROJECTS, p, 'prs.json'), {}).byBranch || {}]))
   const dirs = folders(PROJECTS).flatMap((p) => folders(path.join(PROJECTS, p)).map((name) => path.join(PROJECTS, p, name)))
   return dirs
     .map((dir) => [dir, readJSON(path.join(dir, 'feature.json'), null)])
@@ -100,7 +101,7 @@ function allFeatures() {
       title: f.title || f.name,
       status: shownStatus(dir),
       recap: readJSON(path.join(dir, 'recap.json'), null), // grove recap: goal, done, now, next…
-      pr: prs[f.branch] || null,
+      pr: (prs[path.basename(path.dirname(dir))] || {})[f.branch] || null,
     }))
     .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.name.localeCompare(b.name))
 }
