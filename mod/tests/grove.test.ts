@@ -302,3 +302,20 @@ test('the status names the Claude process, so a session that is gone shows offli
   expect(fake.status().pid).toBe(4242)
   expect(fake.commands.some(argv => argv[0] === 'sh' && argv[2]?.includes('ps -o comm='))).toBe(true)
 })
+
+test('a feature shows its own project\'s PR when another repo has the same branch', async ($, on) => {
+  const fake = host(on, { TMUX_PANE: '%1' })
+  const pr = (number: number) => ({ number, state: 'OPEN', isDraft: false, url: '', ci: 'pass', review: '', updatedAt: '' })
+  fake.files.set(`${HUB}/projects/zeta/flux2/feature.json`,
+    JSON.stringify({ ...REGISTRY, name: 'flux2', project: 'zeta', path: '/home/me/code/zeta-flux' }))
+  fake.files.set(`${HUB}/projects/acme/prs.json`, JSON.stringify({ fetchedAt: 1, byBranch: { 'me/flux': pr(5) } }))
+  fake.files.set(`${HUB}/projects/zeta/prs.json`, JSON.stringify({ fetchedAt: 1, byBranch: { 'me/flux': pr(99) } }))
+
+  await $.session.start({ cwd: WT, surface: null, isInteractive: true })
+  await fake.clock.advance(3100)
+
+  const last = fake.commands.filter(argv => argv.includes('@grove_h2')).at(-1) ?? []
+  const line2 = last[last.indexOf('@grove_h2') + 1] ?? ''
+  expect(line2).toContain('PR ##5')
+  expect(line2).not.toContain('##99')
+})

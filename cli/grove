@@ -56,6 +56,9 @@ Everything lives under ~/.grove, one folder per project and per feature:
                                        /notes.md      the Summary tab's scratchpad
                                        /retro.md      grove retro, then yours to edit
                                        /worktree/     the git worktree (a link for features made elsewhere)
+  ~/.grove/projects/<project>/prs.json                your PRs on its repo, by branch (grove pr)
+                             /findings.json           review-bot comments already seen, by PR number
+                             /github.json             the gh account that can see its repo
 """
 from __future__ import annotations
 
@@ -73,7 +76,8 @@ from pathlib import Path
 HOME = Path.home()
 HUB = Path(os.environ.get("GROVE_HUB", HOME / ".grove"))
 PROJECTS = HUB / "projects"
-PRS, FEEDBACK, CONFIG, THEME = HUB / "prs.json", HUB / "feedback.json", HUB / "config.json", HUB / "theme.json"
+CONFIG, THEME = HUB / "config.json", HUB / "theme.json"
+LEGACY_PRS, LEGACY_FEEDBACK = HUB / "prs.json", HUB / "feedback.json"  # split per project on first run
 AWAKE = HUB / "keepawake.pid"
 AWAKE_POLL = 30
 RECAP_GAP = 180  # seconds between automatic recaps of one feature
@@ -688,13 +692,62 @@ def ci_state(rollup: list) -> str:
     return "pass"
 
 
-def pr_sync(force: bool = False) -> dict:
-    cache = read_json(PRS, {})
-    if not force and time.time() - cache.get("fetchedAt", 0) < PR_TTL:
-        return cache
-    by_branch: dict = {}
-    wanted = {f.get("project") or default_project() for f in features()} if features() else set()
-    for name in wanted:
+# GitHub state is kept per project, beside its project.json: branch names are only unique within one
+# repo, so a cache keyed by branch across repos lets one project's PR stand in for another's.
+
+def prs_file(name: str) -> Path:
+    return PROJECTS / name / "prs.json"  # {fetchedAt, byBranch}
+
+
+def findings_file(name: str) -> Path:
+    return PROJECTS / name / "findings.json"  # {"<pr number>": {handled, pending, updatedAt}}
+
+
+def github_file(name: str) -> Path:
+    return PROJECTS / name / "github.json"  # {account}
+
+
+def project_name_of(f: dict) -> str:
+    return f.get("project") or default_project()
+
+
+def split_legacy_github_state() -> None:
+    """Older hubs kept prs.json (with each project's gh account) and feedback.json at the top, across
+    every project. Move each project's share into its folder, then remove the old files. Entries with no
+    project are dropped: PRs are refetched, and a PR's bot comments seen for the first time are recorded
+    as handled, never announced. Safe to re-run."""
+    names = set(project_names())
+    if LEGACY_PRS.exists():
+        old = read_json(LEGACY_PRS, {})
+        for name, user in old.get("accounts", {}).items():
+            if name in names and not github_file(name).exists():
+                write_json(github_file(name), {"account": user})
+        for name in names:
+            rows = {b: {k: v for k, v in pr.items() if k != "project"}
+                    for b, pr in old.get("byBranch", {}).items() if pr.get("project") == name}
+            if rows and not prs_file(name).exists():
+                write_json(prs_file(name), {"fetchedAt": old.get("fetchedAt", 0), "byBranch": rows})
+        LEGACY_PRS.unlink()
+    if LEGACY_FEEDBACK.exists():
+        by_project: dict = {}
+        for key, seen in read_json(LEGACY_FEEDBACK, {}).items():
+            name, _, number = key.rpartition("#")
+            if name in names:
+                by_project.setdefault(name, {})[number] = seen
+        for name, rows in by_project.items():
+            if not findings_file(name).exists():
+                write_json(findings_file(name), rows)
+        LEGACY_FEEDBACK.unlink()
+
+
+def pr_sync(force: bool = False, only: str | None = None) -> int:
+    """Refresh the PR cache of each project with features (or just `only`) once it is older than PR_TTL,
+    or now when forced. Returns how many PRs are cached across projects."""
+    regs = features()
+    for name in [only] if only else sorted({project_name_of(f) for f in regs}):
+        cache = read_json(prs_file(name), {})
+        if not force and time.time() - cache.get("fetchedAt", 0) < PR_TTL:
+            continue
         p = project(name)
         if p.get("prs") is False:
             continue
@@ -702,28 +755,28 @@ def pr_sync(force: bool = False) -> dict:
                    "number,headRefName,state,isDraft,url,statusCheckRollup,reviewDecision,updatedAt"])
         if r.returncode:
             # no account could reach it this time: keep what was known rather than blank its PRs
-            by_branch.update({b: pr for b, pr in cache.get("byBranch", {}).items() if pr.get("project") == name})
+            write_json(prs_file(name), {**cache, "fetchedAt": time.time()})
             continue
+        by_branch: dict = {}
         for pr in json.loads(r.stdout):
             b = pr["headRefName"]
             if b in by_branch and by_branch[b]["state"] == "OPEN":
                 continue  # keep the open PR over an older closed one
             by_branch[b] = {"number": pr["number"], "state": pr["state"], "isDraft": pr["isDraft"],
-                            "url": pr["url"], "ci": ci_state(pr["statusCheckRollup"]), "project": name,
+                            "url": pr["url"], "ci": ci_state(pr["statusCheckRollup"]),
                             "review": pr.get("reviewDecision") or "", "updatedAt": pr["updatedAt"]}
-    for f in features():
-        pr = by_branch.get(f["branch"])
-        if pr and pr["state"] == "OPEN":
-            pr["findings"] = len(new_findings(project_of(f), pr["number"], pr["updatedAt"]))
-    cache = {"fetchedAt": time.time(), "byBranch": by_branch, "accounts": read_json(PRS, {}).get("accounts", {})}
-    write_json(PRS, cache)
-    return cache
+        for f in regs:
+            pr = by_branch.get(f.get("branch")) if project_name_of(f) == name else None
+            if pr and pr["state"] == "OPEN":
+                pr["findings"] = len(new_findings(p, pr["number"], pr["updatedAt"]))
+        write_json(prs_file(name), {"fetchedAt": time.time(), "byBranch": by_branch})
+    return sum(len(read_json(prs_file(n), {}).get("byBranch", {})) for n in project_names())
 
 
 def pr_for(f: dict) -> dict | None:
     if f.get("kind") == "session":
         return None
-    return read_json(PRS, {}).get("byBranch", {}).get(f["branch"])
+    return read_json(prs_file(project_name_of(f)), {}).get("byBranch", {}).get(f["branch"])
 
 
 def gh_accounts() -> list[str]:
@@ -740,18 +793,16 @@ def gh_token(user: str) -> str:
 def gh_user(p: dict) -> str | None:
     """The signed-in GitHub account that can see a project's repo. People are often signed in to a personal
     and a work account with only one active, and gh answers an unreachable repo's `pr list` with an empty
-    list, not an error: so test access once (gh repo view) and remember the account in prs.json."""
+    list, not an error: so test access once (gh repo view) and remember the account in github.json."""
     if p.get("ghUser"):
         return p["ghUser"]
-    known = read_json(PRS, {}).get("accounts", {}).get(p["name"])
+    known = read_json(github_file(p["name"]), {}).get("account")
     if known and gh_token(known):
         return known
     for user in gh_accounts():
         token = gh_token(user)
         if token and not run(["gh", "repo", "view", "--json", "name"], cwd=p["repo"], env={**os.environ, "GH_TOKEN": token}).returncode:
-            cache = read_json(PRS, {})
-            cache.setdefault("accounts", {})[p["name"]] = user
-            write_json(PRS, cache)
+            write_json(github_file(p["name"]), {"account": user})
             return user
     return None  # gh as it is
 
@@ -771,9 +822,9 @@ def bot_comments(p: dict, number: int) -> list[dict]:
 
 
 def new_findings(p: dict, number: int, updated_at: str, refresh: bool = False, mark: bool = False) -> list[dict]:
-    fb = read_json(FEEDBACK, {})
-    key = f"{p['name']}#{number}"
-    seen = fb.get(key, fb.get(str(number)))
+    fb = read_json(findings_file(p["name"]), {})
+    key = str(number)
+    seen = fb.get(key)
     if seen is not None and seen.get("updatedAt") == updated_at and not (refresh or mark):
         return list(seen.get("pending", []))
     comments = bot_comments(p, number)
@@ -785,8 +836,7 @@ def new_findings(p: dict, number: int, updated_at: str, refresh: bool = False, m
         handled |= {c["id"] for c in pending}
         slim = []
     fb[key] = {"handled": sorted(handled), "pending": slim, "updatedAt": updated_at}
-    fb.pop(str(number), None)
-    write_json(FEEDBACK, fb)
+    write_json(findings_file(p["name"]), fb)
     return slim
 
 
@@ -1641,7 +1691,10 @@ def cmd_ls() -> None:
 def cmd_findings(name: str, brief: bool, mark: bool) -> None:
     f = feature(name)
     p = project_of(f)
-    pr = pr_for(f) or pr_sync(force=True).get("byBranch", {}).get(f["branch"])
+    pr = pr_for(f)
+    if not pr:
+        pr_sync(force=True, only=project_name_of(f))
+        pr = pr_for(f)
     if not pr:
         die(f"{name}: no PR for {f['branch']}")
     pending = new_findings(p, pr["number"], pr["updatedAt"], refresh=True)
@@ -1693,7 +1746,8 @@ def unfinished(f: dict) -> list[str]:
     ahead = int(run(["git", "-C", path, "rev-list", "--count", "HEAD", "--not", *heads]).stdout.strip() or 0) if heads else -1
     pr = pr_for(f) if ahead else None
     if ahead and not (pr and pr["state"] == "MERGED"):
-        pr = pr_sync().get("byBranch", {}).get(f["branch"])
+        pr_sync(only=project_name_of(f))
+        pr = pr_for(f)
     if pr and pr["state"] == "OPEN":
         why.append(f"pull request #{pr['number']} is still open")
     elif ahead and not (pr and pr["state"] == "MERGED"):
@@ -2273,6 +2327,7 @@ def parse_json(text: str) -> dict:
 
 def main(argv: list[str]) -> None:
     cmd, rest = (argv[0], argv[1:]) if argv else ("ls", [])
+    split_legacy_github_state()
     def need(n: int, usage: str) -> None:
         if len(rest) < n:
             die(usage)
@@ -2312,8 +2367,7 @@ def main(argv: list[str]) -> None:
         need(1, "down <name>")
         cmd_servers(rest[0], up=False)
     elif cmd == "pr":
-        cache = pr_sync(force="--force" in rest)
-        print(f"{len(cache.get('byBranch', {}))} PRs cached")
+        print(f"{pr_sync(force='--force' in rest)} PRs cached")
     elif cmd == "findings":
         need(1, "findings <name> [--brief] [--mark]")
         cmd_findings(rest[0], "--brief" in rest, "--mark" in rest)

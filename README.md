@@ -214,9 +214,13 @@ State lives in `~/.grove/`, one folder per project and per feature:
                                      /recap.json     the Summary tab's recap (grove recap)
                                      /notes.md  retro.md   the Summary tab's Scratchpad and Retro
                                      /worktree/      the feature's git worktree
+~/.grove/projects/<project>/prs.json                 your PRs on the repo, by branch (grove pr)
+                           /findings.json            review-bot comments already seen, by PR number
+                           /github.json              the gh account that can see the repo
 ```
 
-plus `prs.json`, `theme.json`, `config.json` at the top. A hub from an older version moves over with
+plus `theme.json`, `config.json` and `focus.json` at the top. PR state is kept per project because
+branch names are only unique within one repo. A hub from an older version moves over with
 `grove migrate` (existing worktrees stay put; their feature folders link to them).
 
 ## Develop
