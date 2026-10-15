@@ -66,6 +66,8 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .pill { color: #000000; font-weight: 700; font-size: 11px; letter-spacing: 0.06em; padding: 2px 8px; border-radius: 4px; text-transform: uppercase; }
 .note { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .next { color: var(--text); font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.btn.fix { flex-shrink: 0; }
+.btn.fix kbd { font: 10px var(--ui); margin-left: 8px; }
 .next b { color: var(--accent); font-weight: 800; margin-right: 6px; letter-spacing: 0.04em; }
 .recap { color: var(--text); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .recap span { color: var(--text-2); }

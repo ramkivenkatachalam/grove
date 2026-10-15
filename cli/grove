@@ -17,6 +17,8 @@ per feature, for any project described by a project config (see `grove project`)
   grove ls                  features, ports, servers, labels, PR/CI, session state
   grove go <name>           (tmux UI) switch to the feature's window
   grove up|down|restart <name>   start / stop / restart the feature's services
+  grove fix <name>          repair only what is broken: missing panels, Claude not running in its pane,
+                         services whose port is not listening; safe to run any time
   grove rename <name> <title…>   the display title (worktree, branch and ports keep the name)
   grove pr [--force]        refresh the PR/CI cache (gh), at most every 3 minutes unless forced
   grove findings <name> [--brief] [--mark]   unanswered claude[bot]/Copilot review comments
@@ -276,7 +278,7 @@ def shown_status(f: dict) -> dict:
     status = status_of(f)
     if status.get("state", "offline") == "offline" or session_live(status):
         return status
-    details = {**(status.get("details") or {}), "note": "", "nextStep": "start Claude in the feature (claude --continue)"}
+    details = {**(status.get("details") or {}), "note": "", "nextStep": f"grove fix {f['name']}"}
     return {**status, "state": "offline", "message": STALE, "details": details}
 
 
@@ -419,9 +421,12 @@ def pane_cmd(cmd: str) -> str:
     return f"{cmd}; exec $SHELL"
 
 
+STOPPED = "stopped — grove up"  # in a stopped service pane's command, so grove fix leaves it stopped
+
+
 def pane_run(pane: dict, f: dict, servers: bool) -> str:
     if pane.get("service") and not servers:
-        return pane_cmd(f"echo '{pane['name']} stopped — grove up {f['name']}'")
+        return pane_cmd(f"echo '{pane['name']} {STOPPED} {f['name']}'")
     cmd = fill(pane.get("run") or "", f)
     return pane_cmd(cmd) if cmd else ""
 
@@ -1419,7 +1424,11 @@ def write_text(path: Path, text: str) -> None:
 
 def claude_in_pane(session: str) -> bool:
     """Whether Claude runs in the session's pane (grove agent execs it, so it is the pane shell's child)."""
-    pid = tmux("display", "-p", "-t", f"={session}:", "#{pane_pid}").stdout.strip()
+    return claude_in(f"={session}:")
+
+
+def claude_in(target: str) -> bool:
+    pid = tmux("display", "-p", "-t", target, "#{pane_pid}").stdout.strip()
     return bool(pid) and run(["pgrep", "-P", pid, "-x", "claude"]).returncode == 0
 
 
@@ -1509,6 +1518,97 @@ def cmd_servers(name: str, up: bool) -> None:
         if pane.get("service") and (pid := find_pane(name, pane["name"])):
             tmux("respawn-pane", "-k", "-t", pid, "-c", str(Path(f["path"]) / pane.get("dir", "")), pane_run(pane, f, up))
     print(f"{name}: services {'restarting' if up else 'stopped'}")
+
+
+def pane_info(target: str) -> dict:
+    """A pane's state for grove fix: idle (dead, or its shell has nothing running: back at the prompt),
+    what runs in it, how long ago it (re)started, and the command it was started with. tmux's own
+    pane_current_command says the shell even while its command runs (no job control), so ask ps."""
+    out = tmux("display", "-p", "-t", target, "#{pane_dead}\t#{pane_pid}\t#{pane_start_command}").stdout
+    dead, pid, start = (out.rstrip("\n").split("\t", 2) + [""] * 3)[:3]
+    kids = run(["pgrep", "-P", pid]).stdout.split() if pid else []
+    cmd = run(["ps", "-o", "comm=", "-p", kids[0]]).stdout.strip().rsplit("/", 1)[-1] if kids else ""
+    etime = run(["ps", "-o", "etime=", "-p", pid]).stdout.strip() if pid else ""
+    days, _, clock = etime.rpartition("-")
+    age = sum(int(x or 0) * m for x, m in zip(reversed(clock.split(":")), (1, 60, 3600))) + int(days or 0) * 86400 if etime else 0
+    return {"idle": dead == "1" or not kids, "cmd": cmd, "age": age, "start": start}
+
+
+def respawn(target: str, pane: dict, f: dict) -> None:
+    tmux("respawn-pane", "-k", "-t", target, "-c", str(Path(f["path"]) / pane.get("dir", "")), pane_run(pane, f, True))
+
+
+def cmd_fix(name: str) -> None:
+    """Check one feature and repair only what is broken. Never touches a running Claude or a listening
+    service, never reinstalls deps or rewrites env files (that is grove doctor's ground)."""
+    f = feature(name)
+    name = f["name"]
+    did, fine, notes = [], [], []
+    ensure_session()
+    # 1. panels: whatever is missing gets made, and what is made now starts by itself
+    if ui_mode() == "app":
+        made = {p["name"] for p in layout(f) if tmux("has-session", "-t", f"={host_session(name, p['name'])}").returncode}
+        if made:
+            host(f)
+    else:
+        made = {p["name"] for p in layout(f)} - {r["pane"] for r in owned_panes(name)}
+        if not has_window(name):
+            open_window(f)
+        elif "claude" in made:
+            made.discard("claude")
+            notes.append(f"its Claude pane is gone from the window: grove relayout {name}")
+        for pane in panels(f):
+            if pane["name"] in made and not find_pane(name, pane["name"]):
+                park_new(f, pane, servers=True)
+        if made:
+            paint_buttons(f)
+    if made - {"claude"}:
+        did.append("opened " + ", ".join(p["name"] for p in layout(f) if p["name"] in made - {"claude"}))
+    # 2. Claude: restart it only where its pane is back at a shell prompt
+    claude = next(p for p in layout(f) if p["name"] == "claude")
+    target = find_pane(name, "claude")
+    if "claude" in made:
+        did.insert(0, "started Claude")
+    elif target and claude_in(target):
+        fine.append("Claude")
+    elif target:
+        info = pane_info(target)
+        elsewhere = claude_running_in(f["path"])
+        if not info["idle"]:
+            notes.append(f"its Claude pane is running {info['cmd']}; left alone")
+        elif elsewhere:
+            notes.append(f"Claude already runs in this worktree in another terminal ({', '.join(elsewhere)}); left alone")
+        else:
+            respawn(target, claude, f)
+            did.insert(0, "started Claude")
+    # 3. services: restart only those not listening (a stopped one stays stopped, a fresh one gets a minute)
+    live = listening()
+    for pane in layout(f):
+        if not pane.get("service") or pane["name"] in made:
+            continue
+        svc, port = pane["name"], ports(f).get(pane["name"])
+        label = f"{svc} (:{port})" if port else svc
+        target = find_pane(name, svc)
+        if not target or (port and port in live):
+            fine.append(svc)
+            continue
+        info = pane_info(target)
+        if STOPPED in info["start"] and info["idle"]:
+            notes.append(f"{svc} is stopped (grove up {name} starts it)")
+        elif not info["idle"] and not port:
+            fine.append(svc)  # nothing to check it by: running is all we can tell
+        elif not info["idle"] and info["age"] < 60:
+            notes.append(f"{label} is still starting")
+        else:
+            respawn(target, pane, f)
+            did.append(f"restarted {label}")
+    # 4. say what happened
+    line = f"{name}: {', '.join(did) if did else 'nothing to fix'}"
+    if did and fine:
+        line += f"; {', '.join(fine)} {'was' if len(fine) == 1 else 'were'} fine"
+    print("\n".join([line, *(f"  {n}" for n in notes)]))
+    if any(d.startswith("restarted") for d in did):
+        print("  if a service keeps dying, grove doctor checks deps, env files and ports")
 
 
 def cmd_ls() -> None:
@@ -2157,7 +2257,7 @@ def paint_offline(f: dict, window: str, fill: str, attn: str, pal: dict) -> None
     on = lambda fg, extra="": f"#[bg={pal['band']} fg={fg}{' ' + extra if extra else ''}]"
     row1 = (f"#[bg={pal['name']} fg=#000000 bold] {esc(f['name'])} {on('#bcbcbc', 'nobold')}  "
             f"#[bg={OFFLINE_FILL} fg=#000000 bold] · OFFLINE {on('#bcbcbc', 'nobold')}  no Claude session running"
-            f"#[align=right]{on(pal['accent'], 'bold')}NEXT ▸ {on('#eeeeee', 'bold')}start Claude in its pane (claude --continue) ")
+            f"#[align=right]{on(pal['accent'], 'bold')}NEXT ▸ {on('#eeeeee', 'bold')}grove fix {esc(f['name'])} ")
     tmux("set-option", "-w", "-t", window, "@grove_h1", row1, ";",
          "set-option", "-w", "-t", window, "@grove_fill", OFFLINE_FILL, ";",
          "set-option", "-w", "-t", window, "@grove_attn", "")
@@ -2205,6 +2305,9 @@ def main(argv: list[str]) -> None:
     elif cmd in ("up", "restart"):
         need(1, f"{cmd} <name>")
         cmd_servers(rest[0], up=True)
+    elif cmd == "fix":
+        need(1, "fix <name>")
+        cmd_fix(rest[0])
     elif cmd == "down":
         need(1, "down <name>")
         cmd_servers(rest[0], up=False)
