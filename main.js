@@ -325,8 +325,44 @@ ipcMain.handle('brief', (_e, name) => {
   }
   return ''
 })
-ipcMain.on('open', (_e, url) => {
-  if (/^https?:\/\//.test(url)) shell.openExternal(url)
+// a project can pick the browser and Chrome profile its links open in, in your own project.json:
+// "browser": {"app": "Google Chrome", "profile": "Work"}. The profile is a folder name ("Profile 2") or
+// the name Chrome shows ("Work"), looked up in the browser's Local State. Unset: the default browser.
+const PROFILE_ROOTS = {
+  'Google Chrome': 'Google/Chrome',
+  'Google Chrome Beta': 'Google/Chrome Beta',
+  'Google Chrome Canary': 'Google/Chrome Canary',
+  Chromium: 'Chromium',
+  'Brave Browser': 'BraveSoftware/Brave-Browser',
+  'Microsoft Edge': 'Microsoft Edge',
+}
+function profileDir(appName, profile) {
+  const root = PROFILE_ROOTS[appName]
+  if (!root || fs.existsSync(path.join(HOME, 'Library/Application Support', root, profile))) return profile
+  const info = readJSON(path.join(HOME, 'Library/Application Support', root, 'Local State'), {})?.profile?.info_cache || {}
+  return Object.keys(info).find((dir) => info[dir]?.name === profile) || profile
+}
+function browserOf(project) {
+  const b = project && readJSON(path.join(PROJECTS, project, 'project.json'), {}).browser
+  if (!b || typeof b !== 'object') return null
+  const appName = typeof b.app === 'string' && b.app.trim() ? b.app.trim() : 'Google Chrome'
+  const profile = typeof b.profile === 'string' && b.profile.trim() ? b.profile.trim() : null
+  return { app: appName, dir: profile && profileDir(appName, profile) }
+}
+function openLink(url, project) {
+  const b = browserOf(project)
+  if (!b) return shell.openExternal(url)
+  // with a profile, the URL goes to the browser itself so it lands in that profile's window
+  const args = b.dir ? ['-na', b.app, '--args', `--profile-directory=${b.dir}`, url] : ['-a', b.app, url]
+  execFile('open', args, (err) => {
+    if (err) shell.openExternal(url) // the browser named isn't installed: the default one still opens it
+  })
+}
+ipcMain.on('open', (e, url) => {
+  if (!/^https?:\/\//.test(url)) return
+  const win = windowOf(e)
+  const project = [...windows].find(([, w]) => w === win)?.[0]
+  openLink(url, project)
 })
 ipcMain.on('open-project', (_e, name) => openProject(name))
 ipcMain.handle('import:scan', (_e, project) => scanProject(project))

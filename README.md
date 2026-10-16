@@ -104,6 +104,7 @@ no `.grove.json` (`--force` to ask anyway), and never starts on its own.
 | `checks`, `agentNotes` | What Claude should run before finishing, and anything else it should know |
 | `panels` | Extra panels beside the services, each `{name, run, dir, key}` (e.g. a test watcher) |
 | `prs`, `ghUser` | `"prs": false` turns off PR/CI syncing; `ghUser` picks the `gh` account (otherwise Grove finds one that can see the repo and remembers it). Every pane Grove starts gets `GH_TOKEN` for that account, so Claude and your shells reach the repo without `gh auth switch` |
+| `browser` | Where the app opens this project's links (service links, Open pull request, links in panes): `{"app": "Google Chrome", "profile": "Work"}`. `profile` is Chrome's profile folder (`Default`, `Profile 2`) or the name Chrome shows; `app` defaults to Google Chrome and can name another Chromium browser (Brave Browser, Microsoft Edge). Set it in your own `project.json` only. Unset, links open in your default browser |
 | `base`, `branchPrefix`, `worktrees` | Branch start point, branch naming (`{user}/`), where worktrees go (default: each feature's folder in `~/.grove`) |
 
 See [`examples/nextjs-fastapi.grove.json`](examples/nextjs-fastapi.grove.json).
