@@ -199,7 +199,11 @@ so macOS opens it without a security prompt. Then open **Grove** from Applicatio
    agents and servers keep running)
 5. for each repo you name, runs `grove import` as a dry run ([above](#bringing-in-work-that-already-exists))
 
-To update: `cd ~/grove && git pull && ./install.sh --app`.
+To update: `grove update` (or **Grove → Update Grove…** in the app). It fast-forwards the checkout (never over
+local changes or local commits), which updates the CLI and the mod at once, and rebuilds the app only when
+its own files changed, reopening it if it was running. The app checks every 6 hours and offers an update with
+a notification; `grove update --auto on` lets it install them itself while Grove is in the background.
+`grove update --check` only looks. `git pull && ./install.sh --app` still works.
 
 It is safe to re-run. Then restart running Claude sessions so they load the mod, and run `grove doctor`.
 

@@ -9,3 +9,4 @@ __pycache__/
 docs/video/frames/
 docs/video/stills/
 docs/video/real.png
+version.json
