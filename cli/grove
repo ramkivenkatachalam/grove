@@ -747,7 +747,7 @@ def ci_state(rollup: list) -> str:
 # repo, so a cache keyed by branch across repos lets one project's PR stand in for another's.
 
 def prs_file(name: str) -> Path:
-    return PROJECTS / name / "prs.json"  # {fetchedAt, byBranch}
+    return PROJECTS / name / "prs.json"  # {fetchedAt, byBranch, error (while the last fetch failed)}
 
 
 def findings_file(name: str) -> Path:
@@ -791,9 +791,29 @@ def split_legacy_github_state() -> None:
         LEGACY_FEEDBACK.unlink()
 
 
+PR_FIELDS = "number,headRefName,state,isDraft,url,statusCheckRollup,reviewDecision,updatedAt"
+PR_LIMIT = 60
+
+
+def gh_failure(r: subprocess.CompletedProcess) -> str:
+    """One line on why a gh call failed, for the stale-status note."""
+    lines = [x.strip() for x in (r.stderr or "").splitlines() if x.strip()]
+    return lines[-1][:160] if lines else f"gh exited {r.returncode}"
+
+
+def add_pr(by_branch: dict, pr: dict) -> None:
+    b = pr["headRefName"]
+    if b in by_branch and by_branch[b]["state"] == "OPEN":
+        return  # keep the open PR over an older closed one
+    by_branch[b] = {"number": pr["number"], "state": pr["state"], "isDraft": pr["isDraft"],
+                    "url": pr["url"], "ci": ci_state(pr["statusCheckRollup"]),
+                    "review": pr.get("reviewDecision") or "", "updatedAt": pr["updatedAt"]}
+
+
 def pr_sync(force: bool = False, only: str | None = None) -> int:
     """Refresh the PR cache of each project with features (or just `only`) once it is older than PR_TTL,
-    or now when forced. Returns how many PRs are cached across projects."""
+    or now when forced. A failed fetch keeps the old states, marked with "error" until a fetch succeeds.
+    Returns how many PRs are cached across projects."""
     regs = features()
     for name in [only] if only else sorted({project_name_of(f) for f in regs}):
         cache = read_json(prs_file(name), {})
@@ -802,26 +822,43 @@ def pr_sync(force: bool = False, only: str | None = None) -> int:
         p = project(name)
         if p.get("prs") is False:
             continue
-        r = gh(p, ["pr", "list", "--author", "@me", "--state", "all", "--limit", "60", "--json",
-                   "number,headRefName,state,isDraft,url,statusCheckRollup,reviewDecision,updatedAt"])
+        r = gh(p, ["pr", "list", "--author", "@me", "--state", "all", "--limit", str(PR_LIMIT), "--json", PR_FIELDS])
         if r.returncode:
-            # no account could reach it this time: keep what was known rather than blank its PRs
-            write_json(prs_file(name), {**cache, "fetchedAt": time.time()})
+            # keep what was known rather than blank its PRs, but say it is stale; the fetchedAt bump stops
+            # a broken gh from being called on every refresh
+            write_json(prs_file(name), {**cache, "fetchedAt": time.time(), "error": gh_failure(r)})
             continue
+        listed = json.loads(r.stdout)
         by_branch: dict = {}
-        for pr in json.loads(r.stdout):
-            b = pr["headRefName"]
-            if b in by_branch and by_branch[b]["state"] == "OPEN":
-                continue  # keep the open PR over an older closed one
-            by_branch[b] = {"number": pr["number"], "state": pr["state"], "isDraft": pr["isDraft"],
-                            "url": pr["url"], "ci": ci_state(pr["statusCheckRollup"]),
-                            "review": pr.get("reviewDecision") or "", "updatedAt": pr["updatedAt"]}
-        for f in regs:
-            pr = by_branch.get(f.get("branch")) if project_name_of(f) == name else None
+        for pr in listed:
+            add_pr(by_branch, pr)
+        error = None
+        mine = [f for f in regs if project_name_of(f) == name and f.get("kind") != "session" and f.get("branch")]
+        if len(listed) >= PR_LIMIT:
+            # a full page: older PRs fell off it, so look up each feature branch it missed by name
+            for f in mine:
+                if f["branch"] in by_branch:
+                    continue
+                r = gh(p, ["pr", "list", "--author", "@me", "--state", "all", "--head", f["branch"],
+                           "--limit", "10", "--json", PR_FIELDS])
+                if r.returncode:
+                    error = gh_failure(r)
+                    if f["branch"] in cache.get("byBranch", {}):
+                        by_branch[f["branch"]] = cache["byBranch"][f["branch"]]
+                    continue
+                for pr in json.loads(r.stdout):
+                    add_pr(by_branch, pr)
+        for f in mine:
+            pr = by_branch.get(f["branch"])
             if pr and pr["state"] == "OPEN":
                 pr["findings"] = len(new_findings(p, pr["number"], pr["updatedAt"]))
-        write_json(prs_file(name), {"fetchedAt": time.time(), "byBranch": by_branch})
+        write_json(prs_file(name), {"fetchedAt": time.time(), "byBranch": by_branch, **({"error": error} if error else {})})
     return sum(len(read_json(prs_file(n), {}).get("byBranch", {})) for n in project_names())
+
+
+def pr_error(name: str) -> str | None:
+    """Why a project's saved PR states may be out of date: the last fetch from GitHub failed."""
+    return read_json(prs_file(name), {}).get("error")
 
 
 def pr_for(f: dict) -> dict | None:
@@ -1741,6 +1778,9 @@ def cmd_ls() -> None:
                 prs += f" 💬{pr['findings']}"
         print(f"{f['name']:<22} {f.get('project', '?'):<12} {svcs:<24} {labs:<14} {prs:<15} "
               f"{status.get('state', '-'):<8} {work[:60]}")
+    for name in sorted({project_name_of(f) for f in regs}):
+        if err := pr_error(name):
+            print(f"PR status for {name} is stale (GitHub fetch failed: {err}); grove pr --force retries")
 
 
 def cmd_findings(name: str, brief: bool, mark: bool) -> None:
@@ -1801,7 +1841,8 @@ def unfinished(f: dict) -> list[str]:
     ahead = int(run(["git", "-C", path, "rev-list", "--count", "HEAD", "--not", *heads]).stdout.strip() or 0) if heads else -1
     pr = pr_for(f) if ahead else None
     if ahead and not (pr and pr["state"] == "MERGED"):
-        pr_sync(only=project_name_of(f))
+        # about to refuse: ask GitHub now, a PR merged within the last PR_TTL would still read as open
+        pr_sync(force=True, only=project_name_of(f))
         pr = pr_for(f)
     if pr and pr["state"] == "OPEN":
         why.append(f"pull request #{pr['number']} is still open")
@@ -2595,6 +2636,9 @@ def main(argv: list[str]) -> None:
         cmd_servers(rest[0], up=False)
     elif cmd == "pr":
         print(f"{pr_sync(force='--force' in rest)} PRs cached")
+        for name in project_names():
+            if err := pr_error(name):
+                print(f"  {name}: GitHub fetch failed, showing saved states: {err}")
     elif cmd == "findings":
         need(1, "findings <name> [--brief] [--mark]")
         cmd_findings(rest[0], "--brief" in rest, "--mark" in rest)

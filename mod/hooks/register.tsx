@@ -60,7 +60,8 @@ const RULE = '#8a8a8a' // separators: decoration only
 const SUMMARY_MODEL = 'claude-haiku-4-5-20251001'
 const SUMMARY_GAP_MS = 60_000
 const GIT_GAP_MS = 20_000
-type PrCache = { fetchedAt?: number; byBranch?: Record<string, Omit<Pr, 'findings'> & { findings?: number }> }
+// error: why the last fetch from GitHub failed; the saved states are kept, and may be out of date
+type PrCache = { fetchedAt?: number; error?: string; byBranch?: Record<string, Omit<Pr, 'findings'> & { findings?: number }> }
 
 const parse = <T,>(text: string): T | undefined => {
   try {
@@ -76,6 +77,7 @@ let me: Registered | undefined
 let myState: FeatureState = 'offline'
 let lastSeen = new Map<string, FeatureState>()
 let lastPr: Pr | null = null
+let prError = '' // this feature's project could not reach GitHub last time: its PR state may be stale
 let isSyncing = false
 let pane: string | undefined
 let summary: Summary = { work: '', now: '', next: '' }
@@ -179,6 +181,7 @@ async function refresh($: EngineInterface) {
   const caches = new Map(await Promise.all(projectDirs.map(async dir =>
     [dir, (await $.fs.read(`${dir}/prs.json`).then(parse<PrCache>, () => undefined)) ?? {}] as const)))
   void syncPrs($, Math.min(...[...caches.values()].map(cache => cache.fetchedAt ?? 0)))
+  prError = me === undefined ? '' : caches.get(projectDirOf(me))?.error ?? ''
   const rows: Feature[] = await Promise.all(
     registry.map(async (one): Promise<Feature> => {
       const status = await $.fs
@@ -393,6 +396,9 @@ async function paintHeader($: EngineInterface) {
     if (pr.findings > 0) {
       facts.push(`${on(pal.accent)}${pr.findings} finding${pr.findings > 1 ? 's' : ''}`)
     }
+  }
+  if (prError) {
+    facts.push(`${on('#e6e6b8')}PR status stale`)
   }
   const gitBits = [git.dirty > 0 ? `✎${git.dirty}` : '', git.ahead > 0 ? `↑${git.ahead}` : '', git.behind > 0 ? `↓${git.behind}` : '']
     .filter(Boolean).join(' ')

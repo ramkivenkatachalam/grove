@@ -60,13 +60,31 @@ class GithubState(unittest.TestCase):
     def feature(self, name):
         return self.grove.read_json(self.grove.PROJECTS / name / f"f-{name}" / "feature.json", None)
 
-    def fake_gh(self, lists, fail=()):
+    def fake_gh(self, lists, fail=(), heads=None):
+        """gh as a fake: `lists` answers `pr list` per project, `heads` answers `pr list --head <branch>`."""
+        self.calls = []
+
         def gh(p, args):
+            self.calls.append(args)
             if args[0] == "pr":
-                code = 1 if p["name"] in fail else 0
-                return subprocess.CompletedProcess(args, code, json.dumps(lists.get(p["name"], [])), "")
+                if p["name"] in fail:
+                    return subprocess.CompletedProcess(args, 1, "", "warning\nHTTP 401: Bad credentials\n")
+                if "--head" in args:
+                    branch = args[args.index("--head") + 1]
+                    return subprocess.CompletedProcess(args, 0, json.dumps((heads or {}).get(branch, [])), "")
+                return subprocess.CompletedProcess(args, 0, json.dumps(lists.get(p["name"], [])), "")
             return subprocess.CompletedProcess(args, 0, "", "")  # bot comments: none
         self.grove.gh = gh
+
+    def committed_feature(self, name):
+        """The feature's repo with a commit that main does not have, as after a squash merge."""
+        f = self.feature(name)
+        git = ["git", "-C", f["path"], "-c", "user.name=t", "-c", "user.email=t@t"]
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+        subprocess.run([*git, "branch", "-M", "main"], check=True)
+        subprocess.run([*git, "checkout", "-q", "-b", "me/fix"], check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "work"], check=True)
+        return f
 
     def test_same_branch_in_two_repos_keeps_both(self):
         g = self.grove
@@ -90,6 +108,51 @@ class GithubState(unittest.TestCase):
         g.pr_sync()
         self.assertEqual(g.pr_for(self.feature("zeta"))["number"], 99)
         self.assertGreater(g.read_json(g.prs_file("zeta"), {})["fetchedAt"], 0)
+
+    def test_a_failed_fetch_is_marked_stale_until_one_succeeds(self):
+        g = self.grove
+        g.write_json(g.prs_file("zeta"), {"fetchedAt": 0, "byBranch": {"me/fix": {"number": 99}}})
+        self.fake_gh({}, fail={"zeta"})
+        g.pr_sync(only="zeta")
+        self.assertEqual(g.pr_error("zeta"), "HTTP 401: Bad credentials")
+        g.pr_sync(only="zeta")  # throttled: still stale, gh not called again
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(g.pr_error("zeta"), "HTTP 401: Bad credentials")
+        self.fake_gh({"zeta": [pr(99, "me/fix", "MERGED")]})
+        g.pr_sync(force=True, only="zeta")
+        self.assertIsNone(g.pr_error("zeta"))
+        self.assertEqual(g.pr_for(self.feature("zeta"))["state"], "MERGED")
+
+    def test_a_branch_off_a_full_page_is_looked_up_by_name(self):
+        g = self.grove
+        page = [pr(1000 + i, f"me/other-{i}", "MERGED") for i in range(g.PR_LIMIT)]
+        self.fake_gh({"acme": page}, heads={"me/fix": [pr(7, "me/fix", "MERGED")]})
+        g.pr_sync(force=True, only="acme")
+        self.assertEqual(g.pr_for(self.feature("acme"))["number"], 7)
+        self.assertEqual([a[a.index("--head") + 1] for a in self.calls if "--head" in a], ["me/fix"])
+
+    def test_a_short_page_is_complete(self):
+        g = self.grove
+        self.fake_gh({"acme": [pr(5, "me/other")]}, heads={"me/fix": [pr(7, "me/fix")]})
+        g.pr_sync(force=True, only="acme")
+        self.assertIsNone(g.pr_for(self.feature("acme")))
+        self.assertFalse(any("--head" in a for a in self.calls))
+
+    def test_closing_rechecks_a_pr_saved_as_open(self):
+        g = self.grove
+        f = self.committed_feature("acme")
+        # fetched a moment ago, before the squash merge: inside PR_TTL, so a normal refresh would skip it
+        g.write_json(g.prs_file("acme"), {"fetchedAt": time.time(), "byBranch": {"me/fix": {"number": 5, "state": "OPEN"}}})
+        self.fake_gh({"acme": [pr(5, "me/fix", "MERGED")]})
+        self.assertEqual(g.unfinished(f), [])
+        self.assertEqual(g.pr_for(f)["state"], "MERGED")
+
+    def test_closing_still_refuses_a_pr_that_is_open(self):
+        g = self.grove
+        f = self.committed_feature("acme")
+        g.write_json(g.prs_file("acme"), {"fetchedAt": time.time(), "byBranch": {"me/fix": {"number": 5, "state": "OPEN"}}})
+        self.fake_gh({"acme": [pr(5, "me/fix", "OPEN")]})
+        self.assertEqual(g.unfinished(f), ["pull request #5 is still open"])
 
     def test_findings_are_kept_per_project(self):
         g = self.grove
