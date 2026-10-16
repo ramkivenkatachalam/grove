@@ -157,6 +157,9 @@ PROJECT_SCHEMA = """\
   checks        what the agent should run before finishing      agentNotes  extra lines for the agent
   panels        extra panels: [{"name", "key", "run", "dir"}]
   ghUser        the gh account for this repo's PRs (default: whichever signed-in account can see it)
+  browser       where the app opens this project's links (your project.json only):
+                {"app": "Google Chrome", "profile": "Work"}; profile = Chrome's folder ("Profile 2")
+                or the name it shows; app defaults to Google Chrome. Unset: the default browser
 """
 
 DEFAULT_PROJECT = {
