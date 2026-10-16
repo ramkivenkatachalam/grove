@@ -89,8 +89,10 @@ For a better config, let Claude write it: **Set up with Claude** on the review s
 or `grove project setup <name>` (`--draft` prints the brief, `--start` opens the session). A **Set up**
 session under Sessions reads the repo and fills in your `project.json`: every dev server and its ports,
 `env` rewrites so each feature's front end calls its own back end, setup, `checks` and `agentNotes`. It
-writes only your `project.json`, never the repo or its `.grove.json` (it asks before suggesting one),
-and finishes by checking `grove project show` and `grove doctor`. It is offered only when the repo has
+writes only your `project.json` and checks it with `grove project show` and `grove doctor`. Then, each
+only if you say yes, it tries the config on a throwaway `setup-check` feature (ports listening, servers
+answering, logs clean) and closes it, and it proposes a `.grove.json` with the parts your team shares,
+opened as a draft PR from its own feature, so teammates don't need to set the project up again. It is offered only when the repo has
 no `.grove.json` (`--force` to ask anyway), and never starts on its own.
 
 | Key | What it does |
