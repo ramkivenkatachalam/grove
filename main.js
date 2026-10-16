@@ -101,6 +101,7 @@ function allFeatures() {
       title: f.title || f.name,
       status: shownStatus(dir),
       recap: readJSON(path.join(dir, 'recap.json'), null), // grove recap: goal, done, now, next…
+      stats: readJSON(path.join(dir, 'stats.json'), null), // grove statusline: model, context, cost…
       pr: (prs[path.basename(path.dirname(dir))] || {})[f.branch] || null,
     }))
     .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || '') || a.name.localeCompare(b.name))

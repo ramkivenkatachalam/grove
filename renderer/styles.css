@@ -113,6 +113,22 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .tab:hover { color: var(--text); }
 .tab[aria-selected="true"] { color: #ffffff; font-weight: 600; border-bottom-color: var(--name); }
 .tab kbd { font: 10px var(--mono); color: var(--text-3); margin-left: 6px; }
+.tabs .grow { flex: 1; }
+.usage-chip { align-self: center; margin-bottom: 4px; border: 1px solid #333333; background: transparent; color: var(--text-2); border-radius: 10px; padding: 1px 9px; font: 11px var(--mono); cursor: pointer; }
+.usage-chip:hover, .usage-chip:focus-visible { color: var(--text); border-color: var(--name); }
+.usage-chip.near { color: var(--waiting); border-color: var(--waiting); }
+.usage h2 { font-size: 13px; color: var(--accent); margin: 10px 0 0; }
+.usage .doc-bar h2 { margin: 0; }
+.usage .dim { color: var(--text-3); }
+.usage-big { margin: 0; color: var(--text-2); }
+.usage-big b { color: var(--text); font-size: 18px; }
+.usage-warn { display: block; margin-top: 4px; color: var(--waiting); }
+.meter { position: relative; display: flex; height: 12px; border-radius: 6px; background: #2a2a2a; overflow: hidden; }
+.meter i { position: absolute; top: 0; bottom: 0; width: 1px; background: #8a8a8a; }
+.legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; color: var(--text-2); font-size: 12px; }
+.legend b { color: var(--text); font-weight: 600; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 7px; vertical-align: -1px; }
+.swatch.none { border: 1px solid #8a8a8a; }
 .tabpanel { flex: 1; min-height: 0; overflow-y: auto; }
 .doc { display: flex; flex-direction: column; gap: 10px; padding: 14px 18px; min-height: 100%; max-width: 900px; }
 .doc-bar { display: flex; align-items: center; gap: 10px; }

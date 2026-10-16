@@ -169,6 +169,7 @@ to start a second Claude on a worktree that already has one.
 | `grove retro <name>` | Drafts the feature's retro (what went well, what didn't, what to try next time with an agent) into its `retro.md`, from its conversations, recap and git. The Summary tab's Retro section has the same button |
 | `grove send <name> <text…>` | Types text into a feature's Claude session as one message (starts the session if needed). The Summary tab's Scratchpad sends a selection this way |
 | `grove recap <name> [--force]` | A scannable recap of a feature (goal, done, now, next, decisions, blockers) for its Summary tab. Sessions refresh it after each turn, at most every 3 minutes, and skip when nothing changed |
+| `grove statusline` | Claude Code's status line (install.sh sets it). In the app: model · context used/limit · cost · session time · lines changed, and it keeps the feature's `stats.json` for the Usage tab (⌃3: context meter by cache use, session totals, plan limits, and a button that runs `/context`) |
 | `grove keepawake [on\|off\|--status]` | Keeps the Mac awake while any agent is working (sessions start it; it lets go when all are idle). `off` turns it off |
 | `grove theme [palette]` · `grove ui app\|tmux` | Header palette · which front end new features open in |
 
@@ -243,6 +244,7 @@ State lives in `~/.grove/`, one folder per project and per feature:
                                      /brief.md       the task; brief.sent.md once Claude has it
                                      /recap.json     the Summary tab's recap (grove recap)
                                      /notes.md  retro.md   the Summary tab's Scratchpad and Retro
+                                     /stats.json     the Usage tab: model, context, cost (grove statusline)
                                      /worktree/      the feature's git worktree
 ~/.grove/projects/<project>/s-<id>/                  a conversation under Sessions: feature.json
                                                      (kind "session"), status.json, recap.json; no worktree
