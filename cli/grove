@@ -2383,6 +2383,75 @@ def cmd_project(rest: list[str]) -> None:
         die("project ls | add <repo> [--name N] | default <name> | show [name] | setup [name] [--draft|--start]")
 
 
+def num(value) -> float | None:
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def session_stats(data: dict) -> dict:
+    """What Claude Code hands its status line, kept as the app's Usage tab reads it (stats.json).
+    Every field is optional: older Claude Code versions send less."""
+    model = data.get("model") or {}
+    cost = data.get("cost") or {}
+    cw = data.get("context_window") or {}
+    cur = cw.get("current_usage") or {}
+    size = num(cw.get("context_window_size"))
+    parts = {k: num(cur.get(src)) for k, src in (("input", "input_tokens"), ("cacheRead", "cache_read_input_tokens"),
+                                                 ("cacheWrite", "cache_creation_input_tokens"), ("output", "output_tokens"))}
+    # what the next request starts from: everything sent last time (the output joins it next turn)
+    sent = [parts[k] for k in ("input", "cacheRead", "cacheWrite") if parts[k] is not None]
+    pct = num(cw.get("used_percentage"))
+    used = sum(sent) if sent else (round(pct * size / 100) if pct is not None and size else None)
+    if pct is None and used is not None and size:
+        pct = round(used * 100 / size, 1)
+    limits = []
+    for key, label in (("five_hour", "5-hour"), ("seven_day", "7-day")):
+        lim = (data.get("rate_limits") or {}).get(key) or {}
+        if num(lim.get("used_percentage")) is not None:
+            limits.append({"label": label, "percent": lim["used_percentage"], "resetsAt": lim.get("resets_at")})
+    return {
+        "session": data.get("session_id"),
+        "model": model.get("display_name") or model.get("id"),
+        "modelId": model.get("id"),
+        "version": data.get("version"),
+        "outputStyle": (data.get("output_style") or {}).get("name"),
+        "context": {"used": used, "size": size, "percent": pct, "parts": parts,
+                    "totalIn": num(cw.get("total_input_tokens")), "totalOut": num(cw.get("total_output_tokens"))},
+        "cost": num(cost.get("total_cost_usd")),
+        "durationMs": num(cost.get("total_duration_ms")),
+        "apiMs": num(cost.get("total_api_duration_ms")),
+        "linesAdded": num(cost.get("total_lines_added")),
+        "linesRemoved": num(cost.get("total_lines_removed")),
+        "rateLimits": limits,
+    }
+
+
+def tokens(n: float) -> str:
+    return f"{n / 1e6:.1f}M".replace(".0M", "M") if n >= 1e6 else f"{round(n / 1e3)}k" if n >= 1e3 else str(int(n))
+
+
+def span(ms: float) -> str:
+    m = int(ms // 60000)
+    return f"{m // 60}h{m % 60:02d}m" if m >= 60 else f"{m}m" if m else f"{int(ms // 1000)}s"
+
+
+CONTEXT_NEAR = 80  # percent of the window used: Claude compacts the conversation soon after
+
+
+def stats_line(s: dict) -> str:
+    """One quiet line under the prompt: model · context used/limit · cost · session time · lines."""
+    c = s["context"]
+    ctx = ""
+    if c["used"] is not None and c["size"]:
+        ctx = f"ctx {tokens(c['used'])}/{tokens(c['size'])} ({c['percent']:.0f}%{', near limit' if c['percent'] >= CONTEXT_NEAR else ''})"
+    elif c["percent"] is not None:
+        ctx = f"ctx {c['percent']:.0f}%"
+    bits = [s["model"] or "", ctx,
+            f"${s['cost']:.2f}" if s["cost"] is not None else "",
+            span(s["durationMs"]) if s["durationMs"] else "",
+            f"+{s['linesAdded']:.0f} −{s['linesRemoved']:.0f}" if s["linesAdded"] or s["linesRemoved"] else ""]
+    return " · ".join(b for b in bits if b)
+
+
 def cmd_statusline() -> None:
     """Claude Code's status line: in the tmux UI the feature switcher; in the app nothing (the sidebar
     is the switcher); outside features an optional legacy script."""
@@ -2394,13 +2463,16 @@ def cmd_statusline() -> None:
     here = next((f for f in regs if (f.get("session") == sid if f.get("kind") == "session" and f.get("session")
                                      else cwd == f["path"] or cwd.startswith(f["path"] + "/"))), None)
     legacy = HOME / ".claude/statusline-feature.sh"
+    if here is not None:
+        stats = session_stats(data)
+        path = feature_dir(here) / "stats.json"
+        # only on change: every write wakes the app's watcher, and Claude re-runs this often
+        if {k: v for k, v in read_json(path, {}).items() if k != "updatedAt"} != stats:
+            write_json(path, {**stats, "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
     if here is not None and ui_mode() == "app":
         # the app's sidebar is the switcher: only what it doesn't show (and never empty, so Claude
-        # replaces whatever it showed before)
-        model = (data.get("model") or {}).get("display_name") or ""
-        cost = (data.get("cost") or {}).get("total_cost_usd")
-        bits = [model, f"${cost:.2f}" if isinstance(cost, (int, float)) else ""]
-        print("\033[38;5;245m" + (" · ".join(b for b in bits if b) or " ") + "\033[0m")
+        # replaces whatever it showed before); the Usage tab has the rest
+        print("\033[38;5;245m" + (stats_line(stats) or " ") + "\033[0m")
         return
     if here is None or not os.environ.get("TMUX"):
         if legacy.exists():

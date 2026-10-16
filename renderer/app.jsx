@@ -308,9 +308,10 @@ function Header({ f, pal, panels, openList, onToggle, onFix, fixing, repo }) {
 const TABS = [
   { id: 'claude', label: 'Claude' },
   { id: 'summary', label: 'Summary' },
+  { id: 'usage', label: 'Usage' },
 ]
 
-function TabBar({ tab, onTab }) {
+function TabBar({ tab, onTab, stats }) {
   const refs = useRef({})
   const move = (e) => {
     const i = TABS.findIndex((t) => t.id === tab)
@@ -329,6 +330,8 @@ function TabBar({ tab, onTab }) {
           {t.label}<kbd>⌃{i + 1}</kbd>
         </button>
       ))}
+      <span className="grow" />
+      <UsageChip stats={stats} onOpen={() => onTab('usage')} />
     </div>
   )
 }
@@ -610,6 +613,111 @@ function SummaryTab({ f, repo, pal, say, onNew }) {
       {task ? <pre className="task">{task}</pre> : <p className="busy">No task was given when this feature was created.</p>}
       <Scratchpad f={f} doc={notes} />
       <RetroSection f={f} say={say} />
+    </div>
+  )
+}
+
+
+// ---------- usage: what the status line hears from Claude Code (grove statusline → stats.json) ----------
+const CONTEXT_NEAR = 80 // percent used: Claude compacts the conversation soon after (as the CLI says)
+const tokens = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(1).replace(/\.0$/, '')}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(Math.round(n))
+const span = (ms) => {
+  const m = Math.floor(ms / 60000)
+  return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : m ? `${m} min` : `${Math.floor(ms / 1000)} s`
+}
+const money = (usd) => `$${usd.toFixed(2)}`
+// the last request, split by how it was billed; a word with every colour
+const PARTS = [
+  { key: 'cacheRead', word: 'Cached (read)', colour: '#6c9bd2', why: 'earlier turns Claude reused from the prompt cache' },
+  { key: 'cacheWrite', word: 'Newly cached', colour: '#c79a5b', why: 'added to the cache this turn' },
+  { key: 'input', word: 'Fresh input', colour: '#9a7fc4', why: 'sent uncached' },
+]
+
+function contextOf(stats) {
+  const c = stats?.context || {}
+  return { ...c, near: (c.percent ?? 0) >= CONTEXT_NEAR }
+}
+
+// beside the tabs: how full the context is and what it cost; opens the Usage tab
+function UsageChip({ stats, onOpen }) {
+  if (!stats) return null
+  const c = contextOf(stats)
+  const bits = [c.percent != null && `ctx ${Math.round(c.percent)}%${c.near ? ' near limit' : ''}`, stats.cost != null && money(stats.cost)].filter(Boolean)
+  if (!bits.length) return null
+  return (
+    <button type="button" className={`usage-chip ${c.near ? 'near' : ''}`} onClick={onOpen}
+      title={`Context ${c.used != null ? `${tokens(c.used)} of ${tokens(c.size)} tokens` : ''} — details in Usage (⌃3)`}>
+      {bits.join(' · ')}
+    </button>
+  )
+}
+
+function UsageTab({ f, say, onClaude }) {
+  const s = f.stats
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 30000)
+    return () => clearInterval(t)
+  }, [])
+  if (!s) {
+    return (
+      <div className="doc usage">
+        <h2>Usage</h2>
+        <p className="busy">No usage yet — it appears once Claude Code shows its status line in this feature (after its first reply).</p>
+      </div>
+    )
+  }
+  const c = contextOf(s)
+  const parts = c.parts || {}
+  const known = c.used != null && c.size
+  const ask = async (command) => {
+    const r = await hub.grove(['send', f.name, command])
+    if (r.code) return say((r.stderr || r.stdout).trim().replace(/^grove: /, ''), true)
+    onClaude()
+  }
+  const rows = [
+    ['Model', <>{s.model || '?'}{s.modelId && s.modelId !== s.model && <span className="dim"> ({s.modelId})</span>}</>],
+    s.cost != null && ['Cost', `${money(s.cost)} this session`],
+    s.durationMs != null && ['Time', `${span(s.durationMs)} in session${s.apiMs != null ? `, ${span(s.apiMs)} of it waiting on the model` : ''}`],
+    (s.linesAdded != null || s.linesRemoved != null) && ['Lines', `+${s.linesAdded ?? 0} added, −${s.linesRemoved ?? 0} removed`],
+    (c.totalIn != null || c.totalOut != null) && ['Tokens, all turns', `${tokens(c.totalIn ?? 0)} in, ${tokens(c.totalOut ?? 0)} out`],
+    ...(s.rateLimits || []).map((l) => [`${l.label} limit`, `${Math.round(l.percent)}% used${l.resetsAt ? ` · resets ${new Date(typeof l.resetsAt === 'number' ? l.resetsAt * 1000 : l.resetsAt).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : ''}`]),
+    s.version && ['Claude Code', s.version],
+    s.outputStyle && ['Output style', s.outputStyle],
+  ].filter(Boolean)
+  return (
+    <div className="doc usage">
+      <div className="doc-bar">
+        <h2>Context</h2>
+        {s.updatedAt && <span className="recap-age">updated {ago(Date.parse(s.updatedAt))}</span>}
+        <span className="grow" />
+        <button className="btn" type="button" onClick={() => ask('/context')} title="Type /context into this feature's Claude: the breakdown by system prompt, tools, MCP, memory files and messages">
+          Full breakdown in Claude (/context)
+        </button>
+      </div>
+      {known ? (
+        <>
+          <p className="usage-big">
+            <b>{tokens(c.used)}</b> of {tokens(c.size)} tokens · {Math.round(c.percent)}% used · {tokens(Math.max(c.size - c.used, 0))} left
+            {c.near && <span className="usage-warn"> ⚠ Near the limit: Claude compacts the conversation soon. Type /compact at a good break, or hand off to a fresh feature.</span>}
+          </p>
+          <div className="meter" role="img" aria-label={`Context ${Math.round(c.percent)}% used: ${PARTS.filter((p) => parts[p.key]).map((p) => `${p.word} ${tokens(parts[p.key])}`).join(', ')}`}>
+            {PARTS.map((p) => parts[p.key] > 0 && <span key={p.key} style={{ width: `${(parts[p.key] / c.size) * 100}%`, background: p.colour }} />)}
+            {!PARTS.some((p) => parts[p.key] > 0) && <span style={{ width: `${c.percent}%`, background: PARTS[0].colour }} />}
+            <i style={{ left: `${CONTEXT_NEAR}%` }} title={`${CONTEXT_NEAR}%: compaction soon`} />
+          </div>
+          <ul className="legend">
+            {PARTS.filter((p) => parts[p.key] != null).map((p) => (
+              <li key={p.key}><span className="swatch" style={{ background: p.colour }} />{p.word} <b>{tokens(parts[p.key])}</b> <span className="dim">— {p.why}</span></li>
+            ))}
+            {parts.output != null && <li><span className="swatch none" />Last reply <b>{tokens(parts.output)}</b> <span className="dim">— joins the context next turn</span></li>}
+          </ul>
+        </>
+      ) : <p className="busy">{c.percent != null ? `${Math.round(c.percent)}% of the context used.` : 'This Claude Code version does not report context use; update it, or use /context.'}</p>}
+      <h2>Session</h2>
+      <dl className="facts-list">
+        {rows.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}
+      </dl>
     </div>
   )
 }
@@ -1205,7 +1313,7 @@ function App() {
               onFix={() => repair(f)} fixing={repairing === f.name} />
             <div className="work">
               <div className="left">
-                <TabBar tab={tab} onTab={setTab} />
+                <TabBar tab={tab} onTab={setTab} stats={f.stats} />
                 {/* the terminal stays mounted under the other tabs so it keeps its tmux attachment */}
                 <section className="claude" id="tabpanel-claude" role="tabpanel" aria-labelledby="tab-claude" hidden={tab !== 'claude'}>
                   {sessions?.claude ? <TerminalView termKey={`${f.name}:claude`} session={sessions.claude.session} focus={!zoom && tab === 'claude'} />
@@ -1215,6 +1323,7 @@ function App() {
                   <section className="tabpanel" id={`tabpanel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
                     {tab === 'summary' && <SummaryTab key={f.name} f={f} repo={state.repo || ''} pal={pal} say={say}
                       onNew={(text) => { setSeed(text); setNewOpen(true) }} />}
+                    {tab === 'usage' && <UsageTab f={f} say={say} onClaude={() => setTab('claude')} />}
                   </section>
                 )}
               </div>
