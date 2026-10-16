@@ -125,6 +125,49 @@ class GithubState(unittest.TestCase):
         g.gh_token = lambda user: "token" if user == "work-account" else ""
         self.assertEqual(g.gh_user(g.project("acme")), "work-account")
 
+    def run_pane(self, cmd, fake_gh_dir):
+        """Run a pane command in sh with a fake gh first on PATH, its final shell swapped for printing GH_TOKEN."""
+        env = {**os.environ, "PATH": f"{fake_gh_dir}:{os.environ['PATH']}"}
+        env.pop("GH_TOKEN", None)
+        script = cmd.replace("exec $SHELL", 'echo "GH_TOKEN=${GH_TOKEN-unset}"')
+        return subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env).stdout.strip()
+
+    def fake_gh_bin(self, token):
+        d = Path(self.tmp.name) / "fakebin"
+        d.mkdir(exist_ok=True)
+        (d / "gh").write_text(f'#!/bin/sh\n[ "$1 $2" = "auth token" ] && printf %s "{token}"\n')
+        (d / "gh").chmod(0o755)
+        return d
+
+    def test_panes_sign_gh_in_as_the_project_account(self):
+        g = self.grove
+        g.write_json(g.github_file("acme"), {"account": "work-account"})
+        f = self.feature("acme")
+        shell = {"name": "shell", "run": ""}
+        service = {"name": "web", "run": "true", "service": True}
+        for cmd in (g.pane_run(shell, f, True), g.pane_run(service, f, True), g.pane_run(service, f, False)):
+            self.assertIn("--user work-account", cmd)
+            self.assertNotIn("secret-token", cmd)  # looked up inside the pane, never on a command line
+        self.assertTrue(g.pane_run(shell, f, True).endswith("exec $SHELL -l"))
+        self.assertIn(g.STOPPED, g.pane_run(service, f, False))  # grove fix still sees a stopped service
+        self.assertEqual(self.run_pane(g.pane_run(service, f, True), self.fake_gh_bin("secret-token")),
+                         "GH_TOKEN=secret-token")
+
+    def test_ghuser_wins_and_no_account_changes_nothing(self):
+        g = self.grove
+        g.write_json(g.github_file("acme"), {"account": "remembered"})
+        g.write_json(g.project_conf("acme"), {**g.read_json(g.project_conf("acme"), {}), "ghUser": "chosen"})
+        self.assertIn("--user chosen", g.pane_run({"name": "shell", "run": ""}, self.feature("acme"), True))
+        f = self.feature("zeta")  # no account known: panes start exactly as before
+        self.assertEqual(g.pane_run({"name": "shell", "run": ""}, f, True), "")
+        self.assertEqual(g.pane_run({"name": "web", "run": "npm run dev"}, f, True), "npm run dev; exec $SHELL")
+
+    def test_an_account_without_a_token_leaves_gh_alone(self):
+        g = self.grove
+        g.write_json(g.github_file("acme"), {"account": "signed-out"})
+        cmd = g.pane_run({"name": "web", "run": "true"}, self.feature("acme"), True)
+        self.assertEqual(self.run_pane(cmd, self.fake_gh_bin("")), "GH_TOKEN=unset")
+
 
 if __name__ == "__main__":
     unittest.main()

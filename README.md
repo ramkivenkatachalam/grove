@@ -101,7 +101,7 @@ no `.grove.json` (`--force` to ask anyway), and never starts on its own.
 | `labels` | Shows a value from an env file as a label (e.g. which database) and warns on some (e.g. `PROD`) |
 | `checks`, `agentNotes` | What Claude should run before finishing, and anything else it should know |
 | `panels` | Extra panels beside the services, each `{name, run, dir, key}` (e.g. a test watcher) |
-| `prs`, `ghUser` | `"prs": false` turns off PR/CI syncing; `ghUser` picks the `gh` account (otherwise Grove finds one that can see the repo and remembers it) |
+| `prs`, `ghUser` | `"prs": false` turns off PR/CI syncing; `ghUser` picks the `gh` account (otherwise Grove finds one that can see the repo and remembers it). Every pane Grove starts gets `GH_TOKEN` for that account, so Claude and your shells reach the repo without `gh auth switch` |
 | `base`, `branchPrefix`, `worktrees` | Branch start point, branch naming (`{user}/`), where worktrees go (default: each feature's folder in `~/.grove`) |
 
 See [`examples/nextjs-fastapi.grove.json`](examples/nextjs-fastapi.grove.json).

@@ -466,10 +466,24 @@ STOPPED = "stopped — grove up"  # in a stopped service pane's command, so grov
 
 
 def pane_run(pane: dict, f: dict, servers: bool) -> str:
+    gh_env = gh_export(project_of(f))
     if pane.get("service") and not servers:
-        return pane_cmd(f"echo '{pane['name']} {STOPPED} {f['name']}'")
+        return pane_cmd(f"{gh_env}echo '{pane['name']} {STOPPED} {f['name']}'")
     cmd = fill(pane.get("run") or "", f)
-    return pane_cmd(cmd) if cmd else ""
+    if cmd:
+        return pane_cmd(gh_env + cmd)
+    return f"{gh_env}exec $SHELL -l" if gh_env else ""  # as tmux would start it: a login shell
+
+
+def gh_export(p: dict) -> str:
+    """A pane's prefix that signs gh in as the project's account (GH_TOKEN), so Claude and your shells reach a
+    repo the active gh account can't see. Only an account already known (ghUser, github.json): no network
+    here. The token is looked up inside the pane, never put on a command line."""
+    user = p.get("ghUser") or read_json(github_file(p["name"]), {}).get("account")
+    if not user:
+        return ""
+    lookup = f"gh auth token --hostname github.com --user {shlex.quote(user)} 2>/dev/null"
+    return f't="$({lookup})" && [ -n "$t" ] && export GH_TOKEN="$t"; unset t; '
 
 
 def hint(f: dict, pane: str) -> str:
