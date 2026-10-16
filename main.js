@@ -1,7 +1,7 @@
 // Grove: the Electron main process. One window per project. State comes from ~/.grove
 // (written by `grove` and the Claude Code mod); actions go through `grove`; every terminal is a tmux session
 // attached through ptybridge.py, so closing a window or quitting never stops an agent or a server.
-const { app, BrowserWindow, ipcMain, shell, Menu, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, shell, Menu, dialog, Notification } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -418,11 +418,85 @@ ipcMain.handle('ask', async (e, message, detail, buttons) => {
   return response
 })
 
+// ---- updates: `grove update` pulls this app's checkout and rebuilds the app; here we only look and offer ----
+const UPDATE_EVERY = 6 * 60 * 60 * 1000
+let update = null // the last `grove update --check --json`, plus { running } while an update runs
+let notifiedFor = ''
+
+function updateItem() {
+  if (update?.running) return { label: 'Updating Grove…', enabled: false }
+  if (update?.available) {
+    const what = update.behind ? `${update.behind} new commit${update.behind === 1 ? '' : 's'}` : 'rebuild the app'
+    return { label: `Update Grove (${what})…`, click: () => confirmUpdate() }
+  }
+  if (update?.blocked) return { label: `Can't Update: ${update.blocked}`, enabled: false }
+  return { label: 'Check for Updates…', click: () => checkUpdate({ manual: true }) }
+}
+
+async function checkUpdate({ manual = false } = {}) {
+  if (update?.running) return
+  const r = await grove(['update', '--check', '--json'])
+  let s = null
+  try { s = JSON.parse(r.stdout) } catch { /* an older CLI, or git missing */ }
+  update = s
+  buildMenu()
+  if (!s) {
+    if (manual) dialog.showMessageBox({ type: 'warning', message: 'Could not check for updates', detail: (r.stderr || r.stdout).trim() })
+    return
+  }
+  if (manual && !s.available) {
+    const detail = s.blocked || s.fetchError || `${s.repo} is on ${s.upstream}, and the app matches it.`
+    dialog.showMessageBox({ type: 'info', message: s.blocked ? "Grove can't update" : 'Grove is up to date', detail })
+    return
+  }
+  if (!s.available) return
+  if (manual) return confirmUpdate()
+  // auto-update waits until Grove is in the background, so nobody loses the window mid-keystroke
+  if (s.auto && !BrowserWindow.getFocusedWindow()) return runUpdate()
+  const key = `${s.head}:${s.behind}:${s.appStale}`
+  if (notifiedFor !== key && Notification.isSupported()) {
+    notifiedFor = key
+    const n = new Notification({ title: 'Grove update available', body: `${updateItem().label.replace(/…$/, '')}. Click to install.` })
+    n.on('click', () => confirmUpdate())
+    n.show()
+  }
+}
+
+async function confirmUpdate() {
+  const s = update
+  if (!s?.available) return
+  const steps = [s.behind && `pulls ${s.behind} commit${s.behind === 1 ? '' : 's'} into ${s.repo}`,
+    'rebuilds the app if its files changed, then reopens it'].filter(Boolean)
+  const { response } = await dialog.showMessageBox({
+    type: 'question', buttons: ['Update', 'Later'], defaultId: 0, cancelId: 1, message: 'Update Grove?',
+    detail: `It ${steps.join(' and ')}. Agents and services keep running in tmux. Running Claude sessions pick up mod changes when restarted.
+
+To update on its own while Grove is in the background: grove update --auto on`,
+  })
+  if (response === 0) runUpdate()
+}
+
+// The update outlives this process: rebuilding the app quits it, and `grove update --relaunch` reopens it.
+function runUpdate() {
+  const log = path.join(HUB, 'update.log')
+  const out = fs.openSync(log, 'w')
+  update = { ...update, running: true }
+  buildMenu()
+  const child = spawn(BIN, ['update', '--relaunch'], { detached: true, stdio: ['ignore', out, out], env: process.env })
+  fs.closeSync(out)
+  child.unref()
+  child.on('exit', (code) => {
+    update = null
+    if (code) dialog.showMessageBox({ type: 'warning', message: 'Grove could not update', detail: `${fs.readFileSync(log, 'utf8').trim().split('\n').slice(-6).join('\n')}\n\nFull log: ${log}` })
+    checkUpdate()
+  })
+}
+
 // ---- menus ----
 let lastMenuKey = ''
 function buildMenu() {
   const list = projects()
-  const key = JSON.stringify(list.map((p) => p.name))
+  const key = JSON.stringify([list.map((p) => p.name), updateItem().label])
   if (key === lastMenuKey) return
   lastMenuKey = key
   const send = (action) => () => BrowserWindow.getFocusedWindow()?.webContents.send('menu', action)
@@ -430,7 +504,21 @@ function buildMenu() {
     label: p.name, accelerator: i < 9 ? `CmdOrCtrl+Shift+${i + 1}` : undefined, click: () => openProject(p.name),
   }))
   Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { role: 'appMenu' },
+    {
+      role: 'appMenu',
+      submenu: [
+        { role: 'about' },
+        updateItem(),
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
+    },
     {
       label: 'Project',
       submenu: [
@@ -483,6 +571,11 @@ app.whenReady().then(async () => {
   buildMenu()
   openRemembered()
   watchHub()
+  // an installed app checks; a dev run (`electron .`) only when asked, so screenshots stay offline
+  if (app.isPackaged || process.env.GROVE_UPDATE_CHECK) {
+    setTimeout(checkUpdate, 15 * 1000)
+    setInterval(checkUpdate, UPDATE_EVERY)
+  }
   app.on('activate', () => {
     if (windows.size === 0) openRemembered()
   })

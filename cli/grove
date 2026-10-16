@@ -27,6 +27,10 @@ per feature, for any project described by a project config (see `grove project`)
                          asks for --force if it has uncommitted or unmerged work; --keep keeps worktree and branch
   grove migrate             move an older hub to one folder per project and feature (safe to re-run)
   grove doctor              check projects and features: files, deps, ports, env, labels
+  grove update [--check [--json]] [--no-app] [--relaunch] [--auto on|off]
+                         pull this Grove checkout (fast-forward only, never over local changes) and
+                         rebuild /Applications/Grove.app when its sources changed; --check only looks;
+                         --auto on lets the app install updates itself (off: it offers them)
   grove keepawake [--status|off|on]   keep the Mac awake while any agent is working (Claude
                          sessions start it; it lets go once none are)
   grove retro <name>        draft the feature's retro (what went well, what didn't, what to try next time
@@ -1349,6 +1353,151 @@ def cmd_keepawake(args: list[str]) -> None:
     working = agents_working()
     state = "off" if not on else f"holding the Mac awake for {', '.join(working)}" if pid and working else "idle"
     print(f"keepawake: {state}")
+
+
+# ---------- updating Grove itself ----------
+#
+# The CLI and the mod are links into this checkout, so a pull updates them at once; the app is a built copy
+# in /Applications that remembers the commit it was built from (version.json, written by `npm run dist`).
+# `grove update` pulls (fast-forward only, never over local changes) and rebuilds the app when files it is
+# built from changed. The app runs `grove update --check --json` now and then to offer (or, with
+# `grove update --auto on`, apply) an update.
+
+REPO = Path(__file__).resolve().parents[1]
+APP_BUNDLE = Path(os.environ.get("GROVE_APP", "/Applications/Grove.app"))
+APP_SOURCES = ("main.js", "preload.js", "ptybridge.py", "renderer", "package.json", "package-lock.json", "build")
+UPDATE_LOG = HUB / "update.log"
+
+
+def git_repo(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["git", "-C", str(REPO), *args], text=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args, 124, "", f"git {args[0]} timed out")
+
+
+def app_commit() -> str | None:
+    """The commit the installed app was built from; None when there is no app or it predates the stamp."""
+    return read_json(APP_BUNDLE / "Contents/Resources/app/version.json", {}).get("commit")
+
+
+def app_needs_build(commit: str | None, head: str) -> bool:
+    if not APP_BUNDLE.exists():
+        return False
+    if not commit or git_repo("cat-file", "-e", f"{commit}^{{commit}}").returncode:
+        return True  # built before the stamp, or from a commit this checkout lacks
+    return git_repo("diff", "--quiet", commit, head, "--", *APP_SOURCES).returncode != 0
+
+
+def update_state(fetch: bool = True) -> dict:
+    """Where this checkout stands against its upstream, and whether the app is behind it."""
+    s = {"repo": str(REPO), "behind": 0, "ahead": 0, "dirty": False, "blocked": None,
+         "auto": bool(read_json(CONFIG, {}).get("autoUpdate", False))}
+    if git_repo("rev-parse", "--git-dir").returncode:
+        return {**s, "blocked": f"{REPO} is not a git checkout"}
+    s["branch"] = git_repo("branch", "--show-current").stdout.strip() or None
+    upstream = git_repo("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if upstream.returncode:
+        return {**s, "blocked": f"{s['branch'] or 'a detached HEAD'} has no upstream branch to update from"}
+    s["upstream"] = upstream.stdout.strip()
+    if fetch:
+        f = git_repo("fetch", "--quiet", s["upstream"].split("/", 1)[0])
+        if f.returncode:
+            s["fetchError"] = (f.stderr or f.stdout).strip().splitlines()[-1:] or ["git fetch failed"]
+            s["fetchError"] = s["fetchError"][0]
+    counts = git_repo("rev-list", "--left-right", "--count", "HEAD...@{u}").stdout.split()
+    if len(counts) == 2:
+        s["ahead"], s["behind"] = int(counts[0]), int(counts[1])
+    s["dirty"] = bool(git_repo("status", "--porcelain", "--untracked-files=no").stdout.strip())
+    s["head"] = git_repo("rev-parse", "HEAD").stdout.strip()
+    s["appCommit"] = app_commit()
+    s["appStale"] = app_needs_build(s["appCommit"], s["head"])
+    if (s["behind"] or s["appStale"]) and s["dirty"]:
+        s["blocked"] = f"{REPO} has uncommitted changes"
+    elif s["behind"] and s["ahead"]:
+        s["blocked"] = f"{s['branch']} has {s['ahead']} local commit(s) that are not on {s['upstream']}"
+    s["available"] = bool(s["behind"] or s["appStale"]) and not s["blocked"]
+    return s
+
+
+def app_running() -> bool:
+    return sys.platform == "darwin" and run(["pgrep", "-xq", "Grove"]).returncode == 0
+
+
+def cmd_update(args: list[str]) -> None:
+    if args[:2] in (["--auto", "on"], ["--auto", "off"]):
+        cfg = read_json(CONFIG, {})
+        cfg["autoUpdate"] = args[1] == "on"
+        write_json(CONFIG, cfg)
+        print(f"auto-update: {args[1]} ({'the app installs updates itself' if args[1] == 'on' else 'the app offers updates'})")
+        return
+    s = update_state(fetch="--no-fetch" not in args)
+    if "--check" in args:
+        if "--json" in args:
+            print(json.dumps(s))
+            return
+        app = ("app up to date" if not APP_BUNDLE.exists() or not s.get("appStale")
+               else "app needs a rebuild")
+        news = f"{s['behind']} new commit(s) on {s.get('upstream')}" if s["behind"] else "checkout up to date"
+        print(f"grove: {news}; {app}; auto-update {'on' if s['auto'] else 'off'}")
+        for key in ("fetchError", "blocked"):
+            if s.get(key):
+                print(f"  {'cannot update' if key == 'blocked' else 'fetch failed'}: {s[key]}")
+        return
+    if s["blocked"]:
+        die(f"cannot update: {s['blocked']}")
+    if s["behind"]:
+        old = s["head"]
+        pull = git_repo("merge", "--ff-only", "@{u}", timeout=120)
+        if pull.returncode:
+            die(f"git merge --ff-only failed: {(pull.stderr or pull.stdout).strip()}")
+        head = git_repo("rev-parse", "HEAD").stdout.strip()
+        print(f"pulled {s['behind']} commit(s): {old[:7]} → {head[:7]} (CLI and mod are live now; "
+              "restart Claude sessions to load mod changes)")
+        for line in git_repo("log", "--oneline", f"{old}..{head}").stdout.splitlines()[:20]:
+            print(f"  {line}")
+        s["appStale"] = app_needs_build(s["appCommit"], head)
+        lock_changed = git_repo("diff", "--quiet", old, head, "--", "package-lock.json").returncode != 0
+    else:
+        print("checkout already up to date")
+        lock_changed = False
+    if not s["appStale"] or "--no-app" in args:
+        print("app: up to date" if APP_BUNDLE.exists() else f"app: not installed at {APP_BUNDLE}")
+        return
+    rebuild_app(relaunch="--relaunch" in args, install_deps=lock_changed or not (REPO / "node_modules").exists())
+
+
+def rebuild_app(relaunch: bool, install_deps: bool) -> None:
+    """Build first, swap second: the running app is quit only once the new one is ready to copy in."""
+    npm = shutil.which("npm")
+    if not npm:
+        die("npm is not installed; the app cannot be rebuilt (brew install node)")
+    if install_deps:
+        print("app: installing dependencies…", flush=True)
+        if subprocess.run([npm, "install", "--no-fund", "--no-audit"], cwd=REPO).returncode:
+            die("npm install failed; the installed app was left as it was")
+    print("app: building…", flush=True)
+    if subprocess.run([npm, "run", "dist"], cwd=REPO).returncode:
+        die("npm run dist failed; the installed app was left as it was")
+    built = sorted((REPO / "out").glob("Grove-darwin-*/Grove.app"))
+    if not built:
+        die("the build did not produce out/Grove-darwin-*/Grove.app")
+    was_running = app_running()
+    if was_running:
+        run(["osascript", "-e", 'quit app "Grove"'])
+        for _ in range(20):
+            if not app_running():
+                break
+            time.sleep(0.5)
+    staged = APP_BUNDLE.with_name(APP_BUNDLE.name + ".new")
+    shutil.rmtree(staged, ignore_errors=True)
+    shutil.copytree(built[-1], staged, symlinks=True)
+    shutil.rmtree(APP_BUNDLE, ignore_errors=True)
+    staged.rename(APP_BUNDLE)
+    print(f"app: installed {APP_BUNDLE} (agents and services kept running in tmux)")
+    if was_running or relaunch:
+        run(["open", str(APP_BUNDLE)])
+        print("app: reopened")
 
 
 RECAP_SYSTEM = """You keep a recap of one coding feature that its developer scans in seconds.
@@ -2737,6 +2886,8 @@ def main(argv: list[str]) -> None:
         cmd_send(rest[0], " ".join(rest[1:]))
     elif cmd == "keepawake":
         cmd_keepawake(rest)
+    elif cmd == "update":
+        cmd_update(rest)
     elif cmd == "attach":
         ensure_session()
         os.execvp("tmux", ["tmux", "attach", "-t", SESSION])
