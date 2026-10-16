@@ -111,7 +111,7 @@ function TerminalView({ termKey, session, focus }) {
 }
 
 // ---------- sidebar ----------
-function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, filterRef, waitingOutside, onReview, failedCount, onFix }) {
+function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, closing = {}, filterRef, waitingOutside, onReview, failedCount, onFix }) {
   const [filter, setFilter] = useState('')
   const [draft, setDraft] = useState('')
   const [newName, setNewName] = useState('')
@@ -176,6 +176,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
         {[...shown.filter((x) => x.kind !== 'session'), ...shown.filter((x) => x.kind === 'session')].map((f, i, all) => {
           const heading = f.kind === 'session' && (i === 0 || all[i - 1].kind !== 'session')
           const st = f.status.state || 'offline'
+          const shutting = closing[f.name]
           const pr = f.pr
           const prBit = pr ? ` · #${pr.number}${pr.state === 'OPEN' ? ({ pass: ' ✓', fail: ' ✗', running: ' ⟳', none: '' })[pr.ci] : pr.state === 'MERGED' ? ' merged' : ''}` : ''
           if (renaming === f.name) {
@@ -199,14 +200,17 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
           return (
             <li key={f.name}>
               {heading && <div className="group" role="presentation">Sessions</div>}
-              <button type="button" className={`row ${f.name === current ? 'current' : ''} ${st}`} aria-current={f.name === current ? 'page' : undefined}
-                title={`${f.title} — ${STATE[st].word}${f.status.message ? `: ${f.status.message}` : ''}`}
-                onClick={() => onPick(f.name)} onDoubleClick={() => setRenaming(f.name)}
-                onContextMenu={(e) => { e.preventDefault(); onMenu(f) }}>
-                <span className="glyph" style={{ color: `var(--${st === 'offline' ? 'text-3' : st})` }} aria-label={STATE[st].word}>{STATE[st].glyph}</span>
+              <button type="button" className={`row ${f.name === current ? 'current' : ''} ${st}${shutting ? ' closing' : ''}`} aria-current={f.name === current ? 'page' : undefined}
+                aria-busy={shutting ? true : undefined}
+                title={shutting ? `${f.title} — ${shutting.word}` : `${f.title} — ${STATE[st].word}${f.status.message ? `: ${f.status.message}` : ''}`}
+                onClick={() => onPick(f.name)} onDoubleClick={() => !shutting && setRenaming(f.name)}
+                onContextMenu={(e) => { e.preventDefault(); if (!shutting) onMenu(f) }}>
+                {shutting
+                  ? <span className="glyph"><span className="spinner" aria-label={shutting.word} /></span>
+                  : <span className="glyph" style={{ color: `var(--${st === 'offline' ? 'text-3' : st})` }} aria-label={STATE[st].word}>{STATE[st].glyph}</span>}
                 <span className="text">
                   <div className="title">{f.title}</div>
-                  <div className="sub">{st === 'offline' && 'offline · '}{where || `${f.parent ? `↳ ${f.parent} · ` : ''}⎇ ${f.branch.replace(/^[^/]+\//, '')}${prBit}`}</div>
+                  <div className="sub">{shutting ? `${shutting.word.toLowerCase()}…` : <>{st === 'offline' && 'offline · '}{where || `${f.parent ? `↳ ${f.parent} · ` : ''}⎇ ${f.branch.replace(/^[^/]+\//, '')}${prBit}`}</>}</div>
                 </span>
                 {i < 9 && <span className="num" aria-hidden="true">⌘{i + 1}</span>}
               </button>
@@ -231,6 +235,24 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
       )}
       <div className="side-foot">⌘N new · ⌘E rename · ⌘1–9 switch</div>
     </nav>
+  )
+}
+
+// covers the work area while grove done runs, so the click visibly did something
+function ClosingCover({ f, job }) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [])
+  const secs = Math.max(0, Math.round((now - job.since) / 1000))
+  return (
+    <div className="closing-cover" role="status" aria-live="polite">
+      <span className="spinner big" aria-hidden="true" />
+      <h1>{job.word} {f.title}…</h1>
+      <p>{job.detail}</p>
+      <p className="busy">{secs}s</p>
+    </div>
   )
 }
 
@@ -1172,6 +1194,15 @@ function App() {
   }
   // grove fix repairs only what is broken; panes it had to recreate need their terminals attached again
   const [repairing, setRepairing] = useState(null)
+  // features being closed: name -> { word, detail, since }. grove done takes a while (servers, tmux,
+  // worktree, branch), so the row and the work area show it until the feature leaves the list
+  const [closing, setClosing] = useState({})
+  const markClosing = (name, word, detail) => setClosing((c) => {
+    const next = { ...c }
+    if (word) next[name] = { word, detail, since: c[name]?.since || Date.now() }
+    else delete next[name]
+    return next
+  })
   const repair = async (feat) => {
     setRepairing(feat.name)
     const r = await hub.grove(['fix', feat.name])
@@ -1192,7 +1223,9 @@ function App() {
     if (choice === 'reveal') hub.reveal(feat.path)
     if (choice === 'done') {
       // a merged, committed feature just goes; anything that might lose work asks first
+      markClosing(feat.name, 'Checking', 'Looking for uncommitted or unmerged work')
       const c = await hub.grove(['done', feat.name, '--check'])
+      markClosing(feat.name, null)
       let why = []
       try { why = JSON.parse(c.stdout).reasons || [] } catch { why = [(c.stderr || 'could not check it').trim()] }
       const args = ['done', feat.name]
@@ -1203,9 +1236,15 @@ function App() {
         if (pick === 2) return
         args.push(pick === 0 ? '--force' : '--keep')
       }
+      markClosing(feat.name, 'Closing', args.includes('--keep')
+        ? 'Stopping its servers and Claude session · keeping the worktree and branch'
+        : 'Stopping its servers and Claude session · removing the worktree and branch')
       const r = await hub.grove(args)
       say((r.stdout || r.stderr).trim(), Boolean(r.code))
       setHosted((h) => ({ ...h, [feat.name]: undefined }))
+      // on success the row goes when the state file watcher drops it; the timeout is a fallback
+      if (r.code) markClosing(feat.name, null)
+      else setTimeout(() => markClosing(feat.name, null), 5000)
     }
   }
 
@@ -1272,7 +1311,7 @@ function App() {
     <div className="app" style={vars}>
       <Sidebar project={state.project} repo={state.repo || ''} elsewhere={Object.values(state.waitingElsewhere || {}).reduce((a, b) => a + b, 0)} features={features} current={f?.name} onPick={(n) => { setCurrent(n); setZoom(null) }} onMenu={rowMenu}
         renaming={renaming} setRenaming={setRenaming} onRename={rename}
-        newOpen={newOpen} setNewOpen={(v) => { if (!v) setSeed(''); setNewOpen(v) }} seed={seed} onCreate={create} creating={creating} filterRef={filterRef}
+        newOpen={newOpen} setNewOpen={(v) => { if (!v) setSeed(''); setNewOpen(v) }} seed={seed} onCreate={create} creating={creating} closing={closing} filterRef={filterRef}
         waitingOutside={outside(scan, dismissed).length} onReview={() => review()}
         failedCount={scan?.failures?.length || 0} onFix={() => setFixing(true)} />
       <main className="main">
@@ -1311,7 +1350,8 @@ function App() {
           <>
             <Header repo={state.repo || ''} f={f} pal={pal} panels={sessions ? Object.values(sessions).filter((s) => s.pane !== 'claude').map((s) => ({ name: s.pane, key: s.key })) : []} openList={open} onToggle={toggle}
               onFix={() => repair(f)} fixing={repairing === f.name} />
-            <div className="work">
+            <div className="work" inert={closing[f.name] ? '' : undefined}>
+              {closing[f.name] && <ClosingCover f={f} job={closing[f.name]} />}
               <div className="left">
                 <TabBar tab={tab} onTab={setTab} stats={f.stats} />
                 {/* the terminal stays mounted under the other tabs so it keeps its tmux attachment */}

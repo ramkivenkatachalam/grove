@@ -224,3 +224,23 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .doc-text.brief { min-height: 220px; height: 280px; flex: none; font-size: 12px; }
 .sheet-warn { margin: 0; color: var(--waiting); border: 1px solid #6a4a3a; border-radius: 6px; padding: 8px 10px; font-size: 12px; }
 .sheet-warn a { color: var(--waiting); text-decoration: underline; cursor: pointer; }
+
+/* ---- closing a feature: grove done takes a while, so the row and the work area show it ---- */
+.spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid #4a4a4a; border-top-color: var(--name); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: -1px; }
+.spinner.big { width: 28px; height: 28px; border-width: 3px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.row.closing { position: relative; overflow: hidden; cursor: progress; }
+.row.closing .title { color: var(--text-2); }
+.row.closing::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.07) 50%, transparent 100%);
+  transform: translateX(-100%); animation: sweep 1.4s ease-in-out infinite; }
+@keyframes sweep { to { transform: translateX(100%); } }
+.closing-cover { position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  background: rgba(28, 28, 28, 0.86); backdrop-filter: blur(2px); color: var(--text-2); cursor: progress; animation: fade-in 0.2s ease-out; }
+.closing-cover h1 { font-size: 18px; color: var(--text); margin: 4px 0 0; }
+.closing-cover p { margin: 0; text-align: center; max-width: 440px; }
+@keyframes fade-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+  .row.closing::after, .closing-cover { animation: none; }
+}
