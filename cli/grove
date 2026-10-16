@@ -2370,14 +2370,39 @@ The keys Grove reads:
 
 ## Rules
 - Write only {conf}. Keep `"repo"`. Delete the `"_help"` key once the file is no longer a guess.
-- Don't edit, create or commit the repo's `.grove.json`, and don't change code in the repo. If a
-  shared `.grove.json` would help the team, suggest it and ask me first.
-- Don't start, stop or create features, and don't run the dev servers yourself: ask me first.
+- Don't edit, create or commit the repo's `.grove.json`, and don't change code in the repo, except as
+  in "Share it" below, after I say yes.
+- Don't start, stop or create features, and don't run the dev servers yourself, except for the one
+  test feature in "Try it" below, after I say yes.
+
+## Try it (ask me first)
+`project show` and `doctor` only check the file. Once they pass, ask me whether to try the config on a
+throwaway feature. If I say yes:
+1. `{BIN} new setup-check --project {p['name']} --title "Set up check"`. It starts its services, and Grove
+   switches to it: tell me to come back here when it is up.
+2. Give the servers a minute, then check each one: its port is listening (`lsof -nP -iTCP:<port>
+   -sTCP:LISTEN`), it answers (`curl -sS -o /dev/null -w '%{{http_code}}' http://localhost:<port>/`),
+   and its log has no errors (`tmux capture-pane -p -t grove_setup-check_<service>`). Run
+   `{BIN} doctor` too: it checks the env rewrites in the new worktree.
+3. Fix {conf} for anything that failed, and tell me what you changed. To retry, run
+   `{BIN} done setup-check` and start again from step 1.
+4. Close it with `{BIN} done setup-check`. If it refuses, tell me why; don't use `--force`.
+
+## Share it (ask me first)
+Everything here is in my private {conf}, so each teammate would have to set it up again. Once it
+works, split it: what is the same for everyone (services, env, setup, checks, agentNotes, labels, base)
+goes in the repo's `.grove.json`; what is only mine (`repo`, `ghUser`, anything with my paths or
+accounts) stays in {conf}. Show me the proposed `.grove.json` and what would be left in {conf}. If I
+say yes:
+1. `{BIN} new grove-json --project {p['name']} --title "Share the Grove config"`, then write
+   `.grove.json` in that feature's worktree (never the main checkout), commit it and open a draft PR.
+2. Leave {conf} as it is until the PR merges: a key there replaces the team's value whole, so trimming
+   it is the last step, and I'll ask for it.
 
 ## Done when
 `{BIN} project show {p['name']}` prints the config you meant and `{BIN} doctor` reports no problem
-with the project. Finish with a short table: each service with its folder, command and ports; each env
-rewrite; and anything you were unsure of.
+with the project. Finish with a short table: each service with its folder, command and ports, and
+whether it passed the test run; each env rewrite; and anything you were unsure of.
 
 `{BIN} doctor` now:
 ```

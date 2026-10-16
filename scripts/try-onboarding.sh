@@ -139,7 +139,9 @@ assert sorted(s["copy"]) == ["api/.env", "web/.env.local"], s' "$GROVE_HUB/proje
 import sys
 d = sys.argv[1]
 assert "exec npm run dev" in d and "localhost:NNNN" in d and "agentNotes" in d, d
-assert ".grove.json" in d and "project show acme-shop" in d and "doctor" in d, d' "$("$GROVE_BIN" project setup acme-shop --draft)"
+assert ".grove.json" in d and "project show acme-shop" in d and "doctor" in d, d
+assert "## Try it (ask me first)" in d and "new setup-check --project acme-shop" in d and "%{http_code}" in d, d
+assert "## Share it (ask me first)" in d and "new grove-json --project acme-shop" in d, d' "$("$GROVE_BIN" project setup acme-shop --draft)"
     "$GROVE_BIN" project setup acme-shop --start >/dev/null 2>&1
     step "starts a Set up session that can read the repo" python3 -c '
 import json, sys
