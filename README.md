@@ -249,7 +249,7 @@ State lives in `~/.grove/`, one folder per project and per feature:
 ~/.grove/projects/<project>/s-<id>/                  a conversation under Sessions: feature.json
                                                      (kind "session"), status.json, recap.json; no worktree
 ~/.grove/projects/<project>/archive/<feature>/       notes and retro kept by grove done
-~/.grove/projects/<project>/prs.json                 your PRs on the repo, by branch (grove pr)
+~/.grove/projects/<project>/prs.json                 your PRs on the repo, by branch (grove pr); "error" while GitHub is unreachable
                            /findings.json            review-bot comments already seen, by PR number
                            /github.json              the gh account that can see the repo
 ~/.grove/config.json       ui (app|tmux), defaultProject, keepAwake

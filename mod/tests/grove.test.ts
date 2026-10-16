@@ -319,3 +319,24 @@ test('a feature shows its own project\'s PR when another repo has the same branc
   expect(line2).toContain('PR ##5')
   expect(line2).not.toContain('##99')
 })
+
+test('a PR state saved after a failed GitHub fetch is marked stale', async ($, on) => {
+  const fake = host(on, { TMUX_PANE: '%1' })
+  const pr = { number: 5, state: 'OPEN', isDraft: false, url: '', ci: 'pass', review: '', updatedAt: '' }
+  fake.files.set(`${HUB}/projects/acme/prs.json`,
+    JSON.stringify({ fetchedAt: 1, error: 'HTTP 401: Bad credentials', byBranch: { 'me/flux': pr } }))
+
+  await $.session.start({ cwd: WT, surface: null, isInteractive: true })
+  await fake.clock.advance(3100)
+  const line2 = () => {
+    const last = fake.commands.filter(argv => argv.includes('@grove_h2')).at(-1) ?? []
+    return last[last.indexOf('@grove_h2') + 1] ?? ''
+  }
+  expect(line2()).toContain('PR ##5')
+  expect(line2()).toContain('PR status stale')
+
+  // the next fetch works: the note goes
+  fake.files.set(`${HUB}/projects/acme/prs.json`, JSON.stringify({ fetchedAt: 2, byBranch: { 'me/flux': pr } }))
+  await fake.clock.advance(3100)
+  expect(line2()).not.toContain('stale')
+})
