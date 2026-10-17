@@ -566,7 +566,35 @@ function openRemembered() {
   for (const name of start) openProject(name, { review: process.env.GROVE_REVIEW === '1' })
 }
 
+// About Grove says which build is running and what it reads, so you can tell whether an update took.
+// A packaged app reads version.json (stamped by `npm run dist`); a run from source asks git directly.
+function setAbout() {
+  let info = null
+  if (app.isPackaged) info = readJSON(path.join(__dirname, 'version.json'), null)
+  else {
+    try {
+      info = require('./scripts/stamp-version').buildInfo()
+    } catch {}
+  }
+  const when = info?.builtAt && new Date(info.builtAt).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })
+  const build = !info ? 'unknown build' : !app.isPackaged ? 'dev, from source' : `built ${when}`
+  app.setAboutPanelOptions({
+    applicationName: 'Grove',
+    applicationVersion: `${app.getVersion()}${info ? ` · ${info.short}` : ''}${info?.pr ? ` (#${info.pr})` : ''}`,
+    version: info?.dirty ? `${build} · dirty` : build,
+    credits: [
+      info?.subject,
+      info?.branch && `Branch: ${info.branch}${info.dirty ? ' (uncommitted changes)' : ''}`,
+      info?.repo,
+      `App: ${app.getAppPath()}`,
+      `Hub: ${HUB}`,
+      `CLI: ${BIN}`,
+    ].filter(Boolean).join('\n'),
+  })
+}
+
 app.whenReady().then(async () => {
+  setAbout()
   await grove(['ui', 'app']) // new features get hosted sessions for this app
   buildMenu()
   openRemembered()
