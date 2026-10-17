@@ -203,7 +203,9 @@ To update: `grove update` (or **Grove → Update Grove…** in the app). It fast
 local changes or local commits), which updates the CLI and the mod at once, and rebuilds the app only when
 its own files changed, reopening it if it was running. The app checks every 6 hours and offers an update with
 a notification; `grove update --auto on` lets it install them itself while Grove is in the background.
-`grove update --check` only looks. `git pull && ./install.sh --app` still works.
+`grove update --check` only looks. `git pull && ./install.sh --app` still works. **Grove → About Grove** shows
+the build that is running (commit, PR, build time, and "dirty" if built from uncommitted changes) and the
+hub and CLI it uses.
 
 It is safe to re-run. Then restart running Claude sessions so they load the mod, and run `grove doctor`.
 
