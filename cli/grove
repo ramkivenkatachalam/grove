@@ -1483,6 +1483,10 @@ def rebuild_app(relaunch: bool, install_deps: bool) -> None:
         if subprocess.run([npm, "install", "--no-fund", "--no-audit"], cwd=REPO).returncode:
             die("npm install failed; the installed app was left as it was")
     print("app: building…", flush=True)
+    ident = REPO / "scripts/signing-identity.sh"
+    if ident.exists() and subprocess.run([str(ident), "--print"], capture_output=True).returncode:
+        print("app: no local signing identity, so this build is signed ad-hoc and macOS will ask for Screen "
+              f"Recording again; run {ident} once to keep grants across builds")
     if subprocess.run([npm, "run", "dist"], cwd=REPO).returncode:
         die("npm run dist failed; the installed app was left as it was")
     built = sorted((REPO / "out").glob("Grove-darwin-*/Grove.app"))

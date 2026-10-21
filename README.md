@@ -198,6 +198,14 @@ so macOS opens it without a security prompt. Then open **Grove** from Applicatio
    line, if you have none) to `~/.claude/settings.json`, keeping a backup
 4. with `--app`, builds Grove.app into `/Applications` (quitting and reopening Grove if it is running;
    agents and servers keep running)
+
+With `--app` it also gives your Mac a local code-signing identity, a self-signed certificate named
+"Grove Local Signing" in your login keychain (`scripts/signing-identity.sh`; macOS asks for your password
+once to trust it for code signing). Every build is signed with it, so permissions you give Grove, such as
+Screen Recording for screenshots, last across rebuilds and `grove update`. Without it the app is signed
+ad-hoc and macOS forgets those permissions on every rebuild. The first build signed with the identity is
+new to macOS, so grant Screen Recording once more (remove the old Grove entry in System Settings →
+Privacy & Security → Screen & System Audio Recording, add the new one, reopen Grove); after that it sticks.
 5. for each repo you name, runs `grove import` as a dry run ([above](#bringing-in-work-that-already-exists))
 
 To update: `grove update` (or **Grove → Update Grove…** in the app). It fast-forwards the checkout (never over
@@ -277,6 +285,7 @@ older version moves over with `grove migrate` (existing worktrees stay put; thei
 |---|---|
 | Run from source | `npm start` |
 | Rebuild and reinstall the app | `npm run install-app` (quit Grove first) |
+| Create the local signing identity (once; builds fall back to ad-hoc without it) | `scripts/signing-identity.sh` |
 | Regenerate the icon from `build/icon.svg` | `npm run icon` |
 | Screenshot the app (visual checks) | `GROVE_SCREENSHOT=/tmp/grove.png npx electron .` |
 | Validate / test the mod | `claude plugin validate mod && claude plugin test mod` |

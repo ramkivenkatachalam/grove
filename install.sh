@@ -120,6 +120,8 @@ PY
 if [ "$APP" = 1 ]; then
   running=0
   if pgrep -xq Grove; then running=1; osascript -e 'quit app "Grove"' >/dev/null 2>&1 || true; sleep 2; fi
+  # a stable signing identity, so privacy grants (Screen Recording) survive rebuilds
+  "$R/scripts/signing-identity.sh" || echo "signing: no local identity; the app is signed ad-hoc"
   (cd "$R" && npm install --no-fund --no-audit && npm run install-app)
   "$H/bin/grove" ui app >/dev/null
   echo "app: /Applications/Grove.app"
