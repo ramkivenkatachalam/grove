@@ -139,7 +139,7 @@ function TerminalView({ termKey, session, focus }) {
 }
 
 // ---------- sidebar ----------
-function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, closing = {}, filterRef, waitingOutside, onReview, failedCount, onFix }) {
+function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, renaming, setRenaming, onRename, newOpen, setNewOpen, seed, onCreate, creating, closing = {}, filterRef, waitingOutside, onReview, failedCount, onFix, onKeys }) {
   const [filter, setFilter] = useState('')
   const [draft, setDraft] = useState('')
   const [newName, setNewName] = useState('')
@@ -261,7 +261,7 @@ function Sidebar({ project, repo, elsewhere, features, current, onPick, onMenu, 
           <span aria-hidden="true">↧</span> {waitingOutside} in progress outside Grove <b>Review</b>
         </button>
       )}
-      <div className="side-foot">⌘N new · ⌘E rename · ⌘1–9 switch</div>
+      <button className="side-foot" type="button" onClick={onKeys} title="All keyboard shortcuts (⌘/)">⌘N new · <b>⌘/ all shortcuts</b></button>
     </nav>
   )
 }
@@ -1097,6 +1097,50 @@ function SetupSheet({ project, onClose, onStarted }) {
   )
 }
 
+// every shortcut in one place (Help › Keyboard Shortcuts, ⌘/); panel keys come from the current feature
+function ShortcutsSheet({ panels, onClose }) {
+  const groups = [
+    ['Features', [
+      ['⌘1–9', 'Switch to the 1st–9th feature'], ['⌘N', 'New feature'], ['⌘E', 'Rename the feature'],
+      ['⌘K', 'Find a feature'], ['⌘⇧R', 'Restart its services'], ['⌘⇧F', 'Fix the feature'],
+    ]],
+    ['Projects', [['⌘⇧1–9', 'Open a project'], ['⌘⇧O', 'Add a project'], ['⌘⇧I', 'Bring in existing work']]],
+    ['Panels and tabs', [
+      ...(panels.length ? panels.filter((p) => p.key).map((p) => [`⌘⌥${p.key.toUpperCase()}`, `Open or close ${p.name}`]) : [['⌘⌥ + key', 'Open or close a panel (its key shows on its button)']]),
+      ['⌘⇧↩', 'Zoom the last panel, or restore it'], ['⌃1–3', 'Claude, Summary and Usage tabs'],
+    ]],
+    ['Screenshots for the agent', [
+      ['⌘⇧S', 'Drag a region'], ['⌘⌥⇧S', 'Click a window'], ['⌘V', 'Paste a copied image into a terminal'],
+    ]],
+    ['In sheets and terminals', [
+      ['⌘↩', 'Confirm (create, bring in, start)'], ['esc', 'Close the sheet'], ['⌥-drag', 'Select text inside a terminal'],
+      ['⌘/', 'This list'],
+    ]],
+  ]
+  return (
+    <div className="sheet-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+      <section className="sheet keys-sheet" role="dialog" aria-modal="true" aria-labelledby="keys-title" tabIndex={-1}
+        ref={(el) => el?.focus()} onKeyDown={(e) => e.key === 'Escape' && onClose()}>
+        <h1 id="keys-title">Keyboard shortcuts</h1>
+        <p className="sheet-sub">Also in the menu bar next to each command. Right-click a feature for more.</p>
+        <div className="keys-grid">
+          {groups.map(([title, rows]) => (
+            <div key={title}>
+              <h2>{title}</h2>
+              <dl className="keys">
+                {rows.map(([k, what]) => <div key={k + what}><dt><kbd>{k}</kbd></dt><dd>{what}</dd></div>)}
+              </dl>
+            </div>
+          ))}
+        </div>
+        <div className="sheet-actions">
+          <button className="btn" type="button" onClick={onClose}>Close  esc</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function App() {
   const [state, setState] = useState({ features: [], palette: {} })
   const [current, setCurrent] = useState(() => localStorage.getItem(`current:${hub.project}`) || '')
@@ -1109,6 +1153,7 @@ function App() {
     try { return JSON.parse(localStorage.getItem('tabs') || '{}') } catch { return {} }
   }) // feature -> main panel tab
   const [renaming, setRenaming] = useState(null)
+  const [keysOpen, setKeysOpen] = useState(false)
   const [newOpen, setNewOpen] = useState(false)
   const [seed, setSeed] = useState('') // a task to start the new-feature form with (from the scratchpad)
   const [creating, setCreating] = useState(null)
@@ -1283,6 +1328,7 @@ function App() {
   useEffect(() => {
     hub.onMenu(async (action) => {
       const { f, toggle, open, zoom } = latest.current
+      if (action === 'keys') setKeysOpen((v) => !v)
       if (action === 'new') setNewOpen(true)
       if (action === 'import') latest.current.review()
       if (action === 'find') filterRef.current?.focus()
@@ -1347,7 +1393,7 @@ function App() {
         renaming={renaming} setRenaming={setRenaming} onRename={rename}
         newOpen={newOpen} setNewOpen={(v) => { if (!v) setSeed(''); setNewOpen(v) }} seed={seed} onCreate={create} creating={creating} closing={closing} filterRef={filterRef}
         waitingOutside={outside(scan, dismissed).length} onReview={() => review()}
-        failedCount={scan?.failures?.length || 0} onFix={() => setFixing(true)} />
+        failedCount={scan?.failures?.length || 0} onFix={() => setFixing(true)} onKeys={() => setKeysOpen(true)} />
       <main className="main">
         {!f && (
           <div className="empty">
@@ -1444,6 +1490,8 @@ function App() {
         <FixSheet project={scan.project} onClose={() => setFixing(false)} onChanged={rescan}
           onStarted={(name) => { setFixing(false); setCurrent(name); setZoom(null); rescan() }} />
       )}
+      {keysOpen && <ShortcutsSheet panels={sessions ? Object.values(sessions).filter((s) => s.pane !== 'claude').map((s) => ({ name: s.pane, key: s.key })) : []}
+        onClose={() => setKeysOpen(false)} />}
       {toast && <div className={`toast ${toast.isError ? 'error' : ''}`} role="status">{toast.text}</div>}
     </div>
   )

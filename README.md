@@ -285,7 +285,7 @@ older version moves over with `grove migrate` (existing worktrees stay put; thei
 
 ## Keys
 
-⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘⇧I bring in existing work · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
+⌘/ shows them all (Help › Keyboard Shortcuts, or the sidebar footer) · ⌘1–9 switch feature · ⌘⇧1–9 open project · ⌘⇧O add project · ⌘⇧I bring in existing work · ⌘N new · ⌘E rename · ⌘K find · ⌘⌥S/B/F shell/be/fe · ⌘⇧↩ zoom panel ·
 ⌘⇧R restart servers · ⌘⇧S screenshot to the agent (⌘⌥⇧S a window; ⌘V pastes a copied image; drop files on a terminal) · right-click a feature for more · ⌥-drag selects text inside a terminal.
 
 ## License

@@ -53,7 +53,15 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
 .btn { border: 0; border-radius: 5px; padding: 4px 10px; cursor: pointer; background: #333333; color: var(--text); }
 .btn.primary { background: var(--name); color: #000000; font-weight: 600; }
 .btn:disabled { opacity: 0.5; cursor: default; }
-.side-foot { padding: 8px 12px 10px; color: #6c6c6c; font: 11px var(--mono); border-top: 1px solid var(--side-line); }
+.side-foot { padding: 8px 12px 10px; color: #8f8f8f; font: 11px var(--mono); border: 0; border-top: 1px solid var(--side-line); background: none; text-align: left; cursor: pointer; }
+.side-foot b { font-weight: 400; color: var(--text-2); }
+.side-foot:hover b, .side-foot:focus-visible b { color: var(--text); text-decoration: underline; }
+.keys-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 4px 28px; }
+.keys { margin: 6px 0 0; display: flex; flex-direction: column; gap: 5px; }
+.keys div { display: flex; gap: 12px; align-items: baseline; }
+.keys dt { flex: 0 0 82px; }
+.keys dd { margin: 0; color: var(--text); }
+.keys kbd { font: 12px var(--mono); color: #ffffff; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; padding: 1px 6px; }
 
 /* ---- right side ---- */
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -244,3 +252,4 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
   .spinner { animation-duration: 2.4s; }
   .row.closing::after, .closing-cover { animation: none; }
 }
+.keys-sheet:focus { outline: none; }
