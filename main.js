@@ -280,6 +280,13 @@ ipcMain.handle('grove', async (_e, args) => {
 })
 // a screenshot for a feature's agent (grove shot): the window steps aside while you drag a region, or
 // a pasted image's bytes come along; the saved file's path comes back for the renderer to type in
+// only a file grove shot just saved counts: an older grove without `shot` prints its help and exits 0
+function shotResult(result) {
+  const out = result.stdout.trim()
+  if (!result.code && path.isAbsolute(out) && !out.includes('\n') && fs.existsSync(out)) return { path: out }
+  if (!result.code) return { error: `${BIN} has no shot command: update Grove, or run this build with GROVE_BIN=<checkout>/cli/grove` }
+  return { error: (result.stderr || result.stdout).trim() || 'screenshot cancelled' }
+}
 ipcMain.handle('shot', async (e, name, mode, bytes, type) => {
   if (mode === 'image') {
     const ext = { 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' }[type] || '.png'
@@ -287,7 +294,7 @@ ipcMain.handle('shot', async (e, name, mode, bytes, type) => {
     fs.writeFileSync(tmp, Buffer.from(bytes))
     const result = await grove(['shot', name, tmp, '--print'])
     fs.rmSync(tmp, { force: true })
-    return result.code ? { error: (result.stderr || result.stdout).trim() } : { path: result.stdout.trim() }
+    return shotResult(result)
   }
   const win = windowOf(e)
   const hide = win?.isVisible()
@@ -297,8 +304,7 @@ ipcMain.handle('shot', async (e, name, mode, bytes, type) => {
     win.show()
     win.focus()
   }
-  if (!result.code) return { path: result.stdout.trim() }
-  return { error: (result.stderr || result.stdout).trim() || 'screenshot cancelled' }
+  return shotResult(result)
 })
 ipcMain.handle('host', async (_e, name) => {
   const result = await grove(['host', name])
