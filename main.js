@@ -581,6 +581,10 @@ function buildMenu() {
       ],
     },
     { role: 'windowMenu' },
+    {
+      role: 'help',
+      submenu: [{ label: 'Keyboard Shortcuts', accelerator: 'CmdOrCtrl+/', click: send('keys') }],
+    },
   ]))
   app.dock?.setMenu(Menu.buildFromTemplate([
     ...list.map((p) => ({ label: p.name, click: () => openProject(p.name) })),
