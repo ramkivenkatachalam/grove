@@ -36,6 +36,11 @@ per feature, for any project described by a project config (see `grove project`)
   grove retro <name>        draft the feature's retro (what went well, what didn't, what to try next time
                          with an agent) into its retro.md; once, as the feature wraps up
   grove send <name> <text…>  type text into the feature's Claude session (starts it if needed)
+  grove shot <name> [--clip | --window | <image>] [--print] [--send] [note…]
+                         a screenshot for the feature's agent: drag a region (--window: click a
+                         window; --clip: the clipboard's image; or an image file), saved in its
+                         shots/ folder and pasted at Claude's prompt; a note (or --send) sends it,
+                         --print only prints the saved path
   grove recap <name> [--force] [--bg]   a scannable recap of the feature's work (goal, done, now, next,
                          decisions, blockers), written to its recap.json; sessions refresh it after
                          each turn, at most every few minutes; --bg returns at once
@@ -63,6 +68,7 @@ Everything lives under ~/.grove, one folder per project and per feature:
                                        /recap.json    goal, done, now, next… (grove recap)
                                        /notes.md      the Summary tab's scratchpad
                                        /retro.md      grove retro, then yours to edit
+                                       /shots/        screenshots handed to the agent (grove shot)
                                        /worktree/     the git worktree (a link for features made elsewhere)
   ~/.grove/projects/<project>/prs.json                your PRs on its repo, by branch (grove pr)
                              /findings.json           review-bot comments already seen, by PR number
@@ -1730,6 +1736,12 @@ def cmd_send(name: str, text: str) -> None:
     f = feature(name)
     if not text.strip():
         die("send <name> <text…>: nothing to send")
+    type_into_claude(f, text.strip(), enter=True)
+    print(f"{f['name']}: sent to Claude ({len(text.strip())} characters)")
+
+
+def type_into_claude(f: dict, text: str, enter: bool) -> None:
+    """Paste text at the prompt of a feature's Claude session (starting it if needed); Enter sends it."""
     session = host_session(f["name"], "claude")
     if tmux("has-session", "-t", f"={session}").returncode:
         host(f, servers=False)
@@ -1741,11 +1753,77 @@ def cmd_send(name: str, text: str) -> None:
         die(f"{f['name']}: Claude is not running in its session (open the feature in Grove, then send again)")
     time.sleep(0.5)
     buf = f"grove-send-{os.getpid()}"
-    tmux("set-buffer", "-b", buf, "--", text.strip())
+    tmux("set-buffer", "-b", buf, "--", text)
     tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", f"={session}:")
-    time.sleep(0.3)
-    tmux("send-keys", "-t", f"={session}:", "Enter")
-    print(f"{f['name']}: sent to Claude ({len(text.strip())} characters)")
+    if enter:
+        time.sleep(0.3)
+        tmux("send-keys", "-t", f"={session}:", "Enter")
+
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def shot_path(f: dict, ext: str = ".png") -> Path:
+    """A fresh file in the feature's shots/ folder (in the hub, so out of the worktree and out of git)."""
+    d = feature_dir(f) / "shots"
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    p, n = d / f"{stamp}{ext}", 1
+    while p.exists():
+        n += 1
+        p = d / f"{stamp}-{n}{ext}"
+    return p
+
+
+def clipboard_image(dest: Path) -> bool:
+    """Write the clipboard's image (a screenshot taken with ⌃⇧⌘4, an image copied in a browser) as PNG."""
+    script = [
+        "try", "set png to (the clipboard as «class PNGf»)", "on error", "return \"none\"", "end try",
+        f"set fh to open for access POSIX file {json.dumps(str(dest))} with write permission",
+        "set eof fh to 0", "write png to fh", "close access fh", "return \"ok\"",
+    ]
+    r = run(["osascript", *[a for line in script for a in ("-e", line)]])
+    if r.stdout.strip() != "ok":
+        dest.unlink(missing_ok=True)
+        return False
+    return dest.exists() and dest.stat().st_size > 0
+
+
+def cmd_shot(args: list[str]) -> None:
+    """Put a screenshot in front of a feature's agent: capture a region (or the clipboard's image, or a
+    file), keep it in the feature's shots/ folder, and paste its path at Claude's prompt, which attaches
+    it as an image. With a note the message is sent; without one it waits for you to add words."""
+    flags = {a for a in args if a in ("--clip", "--window", "--print", "--send")}
+    words = [a for a in args if a not in flags]
+    if not words:
+        die("shot <name> [--clip | --window | <image>] [--print] [--send] [note…]")
+    f = feature(words.pop(0))
+    src = Path(words[0]).expanduser() if words and Path(words[0]).expanduser().is_file() else None
+    if src:
+        words.pop(0)
+        if src.suffix.lower() not in IMAGE_EXTS:
+            die(f"{src}: not an image ({', '.join(sorted(IMAGE_EXTS))})")
+        dest = shot_path(f, src.suffix.lower())
+        shutil.copyfile(src, dest)
+    elif "--clip" in flags:
+        dest = shot_path(f)
+        if not clipboard_image(dest):
+            die("the clipboard holds no image (take one with ⌃⇧⌘4, or copy an image first)")
+    else:
+        if not shutil.which("screencapture"):
+            die("screencapture not found: shot captures on macOS only (pass an image file or --clip instead)")
+        dest = shot_path(f)
+        # -i: drag a region, or Space for a window; -w starts in window mode; -x: no shutter sound
+        run(["screencapture", "-x", "-iw" if "--window" in flags else "-i", str(dest)])
+        if not dest.exists():
+            print("screenshot cancelled")
+            sys.exit(1)
+    note = " ".join(words).strip()
+    if "--print" in flags:  # the app types the path into the terminal itself
+        print(dest)
+        return
+    type_into_claude(f, f"{dest} {note}".rstrip() + ("" if note or "--send" in flags else " "), enter=bool(note) or "--send" in flags)
+    print(f"{f['name']}: {'sent' if note or '--send' in flags else 'pasted'} {dest.name} to Claude")
 
 
 def cmd_agent(name: str) -> None:
@@ -2884,6 +2962,8 @@ def main(argv: list[str]) -> None:
     elif cmd == "send":
         need(2, "send <name> <text…>")
         cmd_send(rest[0], " ".join(rest[1:]))
+    elif cmd == "shot":
+        cmd_shot(rest)
     elif cmd == "keepawake":
         cmd_keepawake(rest)
     elif cmd == "update":

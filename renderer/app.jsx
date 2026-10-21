@@ -41,6 +41,18 @@ hub.term.onExit((id) => {
   t.term.write('\r\n\x1b[2m[session ended — switch away and back to reattach]\x1b[0m\r\n')
 })
 
+// screenshots and dropped files reach an agent as paths typed at its prompt; Claude attaches images
+let notify = () => {} // the app's toast, set once it mounts
+const typedPath = (p) => p.replace(/([^\w@%+=:,./-])/g, '\\$1') // backslash-escaped, as Terminal and iTerm drop them
+async function shotInto(t, mode, image) {
+  const r = await hub.shot(t.key.split(':')[0], mode, image && new Uint8Array(await image.arrayBuffer()), image?.type)
+  if (r.error) return notify(r.error, r.error !== 'screenshot cancelled')
+  t.term.paste(typedPath(r.path) + ' ')
+  t.term.focus()
+}
+// the page must not navigate to a file dropped outside a terminal
+for (const type of ['dragover', 'drop']) document.addEventListener(type, (e) => e.preventDefault())
+
 function termFor(key, session) {
   let t = terms.get(key)
   if (t && t.session !== session) {
@@ -71,6 +83,22 @@ function termFor(key, session) {
     term.onResize(({ cols, rows }) => t.started && hub.term.resize(id, cols, rows))
     // app shortcuts (⌘…) belong to the app, not the terminal
     term.attachCustomKeyEventHandler((ev) => !(ev.metaKey && !['c', 'v', 'a'].includes(ev.key)))
+    // ⌘V of a bare image (a ⌃⇧⌘4 screenshot, an image copied in a browser) goes in as a saved file;
+    // xterm's own paste would send nothing. Caught before xterm's textarea sees it
+    el.addEventListener('paste', (ev) => {
+      const data = ev.clipboardData
+      const image = [...(data?.files || [])].find((file) => file.type.startsWith('image/'))
+      if (!image || data.getData('text/plain')) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      shotInto(t, 'image', image)
+    }, true)
+    el.addEventListener('drop', (ev) => {
+      const paths = [...(ev.dataTransfer?.files || [])].map((file) => hub.pathOf(file)).filter(Boolean)
+      if (!paths.length) return
+      t.term.paste(paths.map(typedPath).join(' ') + ' ')
+      t.term.focus()
+    })
     terms.set(key, t)
     byId.set(id, t)
   }
@@ -1156,6 +1184,7 @@ function App() {
     setToast({ text, isError })
     setTimeout(() => setToast(null), isError ? 9000 : 3500)
   }
+  notify = say
 
   // every feature shown gets its tmux sessions (idempotent; adopts panes from the tmux UI)
   useEffect(() => {
@@ -1263,6 +1292,11 @@ function App() {
         say((r.stdout || r.stderr).trim(), Boolean(r.code))
       }
       if (action === 'fix' && f) latest.current.repair(f)
+      if (action.startsWith('shot') && f) {
+        const t = terms.get(`${f.name}:claude`)
+        if (t?.started) shotInto(t, action === 'shot:window' ? 'window' : 'region')
+        else say(`${f.title || f.name}: its Claude session is not open yet`, true)
+      }
       if (action.startsWith('toggle:')) toggle(action.slice(7))
       if (action === 'zoom') setZoom(zoom ? null : open[open.length - 1] || null)
     })

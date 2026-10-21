@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('hub', {
   project: new URLSearchParams(location.search).get('project') || null,
@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('hub', {
     write: (kind, name, text) => ipcRenderer.invoke('doc:write', kind, name, text),
   },
   brief: (name) => ipcRenderer.invoke('brief', name),
+  shot: (name, mode, bytes, type) => ipcRenderer.invoke('shot', name, mode, bytes, type),
+  pathOf: (file) => webUtils.getPathForFile(file),
   term: {
     open: (opts) => ipcRenderer.invoke('term:open', opts),
     write: (id, data) => ipcRenderer.send('term:write', id, data),
