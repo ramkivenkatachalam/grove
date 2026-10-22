@@ -88,6 +88,12 @@ function shownStatus(dir) {
   return { ...status, state: 'offline', message: 'no Claude session running', details }
 }
 
+// the captions and file names only; the images come one by one (proof:image) when the Summary shows them
+function proofOf(dir) {
+  const rows = readJSON(path.join(dir, 'proof', 'proof.json'), [])
+  return Array.isArray(rows) ? rows.filter((r) => r && /^[\w.-]+$/.test(r.file || '') && fs.existsSync(path.join(dir, 'proof', r.file))) : []
+}
+
 function allFeatures() {
   // each project's PRs, by branch (branch names are only unique within one repo)
   const prs = Object.fromEntries(folders(PROJECTS).map((p) => [p, readJSON(path.join(PROJECTS, p, 'prs.json'), {}).byBranch || {}]))
@@ -100,7 +106,8 @@ function allFeatures() {
       project: f.project || path.basename(path.dirname(dir)),
       title: f.title || f.name,
       status: shownStatus(dir),
-      recap: readJSON(path.join(dir, 'recap.json'), null), // grove recap: goal, done, now, next…
+      recap: readJSON(path.join(dir, 'recap.json'), null), // grove recap: summary, why, tasks, diagram…
+      proof: proofOf(dir), // grove proof: screenshots that show it working
       stats: readJSON(path.join(dir, 'stats.json'), null), // grove statusline: model, context, cost…
       pr: (prs[path.basename(path.dirname(dir))] || {})[f.branch] || null,
     }))
@@ -321,6 +328,23 @@ function featureDir(name) {
   return project ? path.join(PROJECTS, project, name) : null
 }
 
+const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }
+const proofFile = (name, file) => {
+  const dir = featureDir(name)
+  return dir && /^[\w.-]+$/.test(file) && IMAGE_TYPES[path.extname(file).toLowerCase()] ? path.join(dir, 'proof', file) : null
+}
+ipcMain.handle('proof:image', (_e, name, file) => {
+  const p = proofFile(name, file)
+  try {
+    return p ? `data:${IMAGE_TYPES[path.extname(p).toLowerCase()]};base64,${fs.readFileSync(p).toString('base64')}` : null
+  } catch {
+    return null
+  }
+})
+ipcMain.on('proof:open', (_e, name, file) => {
+  const p = proofFile(name, file)
+  if (p && fs.existsSync(p)) shell.openPath(p)
+})
 // a feature's notes and retro: markdown in its hub folder, kept out of the worktree (and so out of git)
 const DOCS = { notes: 'notes.md', retro: 'retro.md' }
 const docFile = (kind, name) => {

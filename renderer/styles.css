@@ -253,3 +253,31 @@ button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid 
   .row.closing::after, .closing-cover { animation: none; }
 }
 .keys-sheet:focus { outline: none; }
+
+/* summary: one line, why and decisions, the diagram, the task list, validation */
+.recap-title { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.recap-sub { color: var(--text-3); font-size: 12px; }
+.recap-count { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--text-3); }
+.recap-block .dim, .proof-caption .dim { color: var(--text-2); }
+.recap-block b { font-weight: 600; }
+.recap-block code { font: 11px var(--mono); color: var(--text-2); }
+.progress { height: 4px; background: #2c2c2c; border-radius: 2px; overflow: hidden; margin: 2px 0 6px; max-width: 320px; }
+.progress span { display: block; height: 100%; }
+.recap-block ul.tasks { list-style: none; padding-left: 0; }
+.tasks li { display: flex; gap: 8px; align-items: baseline; }
+.task-glyph { width: 12px; flex: none; text-align: center; color: var(--text-3); }
+.task-done > span:last-child { color: var(--text-2); }
+.task-doing > span:last-child { font-weight: 600; }
+.task-now, .check-word { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-left: 4px; }
+.diagram { overflow-x: auto; padding: 4px 0; }
+.diagram svg { display: block; max-width: 100%; height: auto; }
+.diagram-node { fill: var(--text); font: 12px var(--ui); }
+.diagram-edge { fill: var(--text-2); font: 11px var(--ui); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; }
+.recap-block ul.proof { list-style: none; padding-left: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-top: 8px; }
+.proof li { display: flex; flex-direction: column; gap: 4px; }
+.proof-shot { padding: 0; border: 1px solid #333333; border-radius: 6px; background: #141414; cursor: zoom-in; overflow: hidden; aspect-ratio: 16 / 10; display: flex; align-items: center; justify-content: center; }
+.proof-shot:hover { border-color: var(--name); }
+.proof-shot:focus-visible { outline: 2px solid #ffffff; outline-offset: 1px; }
+.proof-shot img { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+.proof-wait { color: var(--text-3); font-size: 12px; }
+.proof-caption { color: var(--text); font-size: 12px; line-height: 1.35; }

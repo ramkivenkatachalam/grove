@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('hub', {
     write: (kind, name, text) => ipcRenderer.invoke('doc:write', kind, name, text),
   },
   brief: (name) => ipcRenderer.invoke('brief', name),
+  proof: {
+    image: (name, file) => ipcRenderer.invoke('proof:image', name, file),
+    open: (name, file) => ipcRenderer.send('proof:open', name, file),
+  },
   shot: (name, mode, bytes, type) => ipcRenderer.invoke('shot', name, mode, bytes, type),
   pathOf: (file) => webUtils.getPathForFile(file),
   term: {

@@ -41,9 +41,11 @@ per feature, for any project described by a project config (see `grove project`)
                          window; --clip: the clipboard's image; or an image file), saved in its
                          shots/ folder and pasted at Claude's prompt; a note (or --send) sends it,
                          --print only prints the saved path
-  grove recap <name> [--force] [--bg]   a scannable recap of the feature's work (goal, done, now, next,
-                         decisions, blockers), written to its recap.json; sessions refresh it after
-                         each turn, at most every few minutes; --bg returns at once
+  grove proof <name> (<image> | --clip) [caption…]   keep a screenshot that shows the feature working;
+                         the Summary tab shows it under Validation (--ls [--json] lists them)
+  grove recap <name> [--force] [--bg]   the feature's summary (one line, why, decisions, task list,
+                         blockers, validation, a diagram), written to its recap.json; sessions refresh
+                         it after each turn, at most every few minutes; --bg returns at once
 
   grove project ls                       projects and which one is the default
   grove project add <repo> [--name N]    register a repo (reads its .grove.json, or writes a starter)
@@ -65,10 +67,11 @@ Everything lives under ~/.grove, one folder per project and per feature:
   ~/.grove/projects/<project>/<feature>/feature.json  the registry entry
                                        /status.json   written by the Claude Code mod
                                        /brief.md      the task, until the agent picks it up
-                                       /recap.json    goal, done, now, next… (grove recap)
+                                       /recap.json    summary, why, tasks, diagram… (grove recap)
                                        /notes.md      the Summary tab's scratchpad
                                        /retro.md      grove retro, then yours to edit
                                        /shots/        screenshots handed to the agent (grove shot)
+                                       /proof/        screenshots that show it working (grove proof)
                                        /worktree/     the git worktree (a link for features made elsewhere)
   ~/.grove/projects/<project>/prs.json                your PRs on its repo, by branch (grove pr)
                              /findings.json           review-bot comments already seen, by PR number
@@ -974,6 +977,7 @@ You are working alone in worktree `{f['path']}` on branch `{f['branch']}`. {serv
 
 ## Finish like this
 - Keep to the task's scope. {p.get('checks') or DEFAULT_PROJECT['checks']}
+- When a screenshot shows the change working, keep it: `grove proof {f['name']} <image> <what it shows>`.
 - Commit with a conventional message describing what the code does, push, and open a draft PR,
   then invoke the `pr-watch-feedback` skill (if you have it) to see CI and review findings through.
 - End with a 3-line summary: what changed, what you verified, what you did not.
@@ -1510,18 +1514,25 @@ def rebuild_app(relaunch: bool, install_deps: bool) -> None:
         print("app: reopened")
 
 
-RECAP_SYSTEM = """You keep a recap of one coding feature that its developer scans in seconds.
+RECAP_SYSTEM = """You keep the summary of one coding feature that its developer reads to catch up in a minute.
 Reply with JSON only, no prose and no code fence:
-{"goal": "...", "done": ["..."], "now": "...", "next": ["..."], "decisions": ["..."], "blockers": ["..."]}
+{"goal": "...", "summary": "...", "why": ["..."], "decisions": [{"choice": "...", "why": "..."}],
+ "tasks": [{"text": "...", "state": "done"}], "blockers": ["..."], "validation": [{"check": "...", "result": "pass"}],
+ "diagram": {"nodes": [{"id": "a", "label": "..."}], "edges": [{"from": "a", "to": "b", "label": "..."}]}}
 - goal: what the feature is for, at most 10 words
-- done: finished work, oldest first
-- now: what is happening at this moment, at most 8 words
-- next: the next concrete steps, most urgent first
-- decisions: choices made that someone picking this up must know
+- summary: one sentence, at most 30 words: what the feature does and where it stands
+- why: the motivation, the problem it solves for whom; 1 to 3 items
+- decisions: key design choices someone picking this up must know, each with its reason
+- tasks: the work as a checklist, done first (oldest first), then the one in progress, then what is next
+  (most urgent first); state is "done", "doing" or "todo"; at most one "doing"
 - blockers: what stops progress or waits on the developer; [] when nothing does
-Write fragments, not sentences: no "I", no "we", no trailing periods. At most 8 words per item and
-5 items per list, the most important kept. Keep the previous recap's wording for items that still hold,
-drop what is no longer true, never invent anything the material does not show."""
+- validation: how the work was checked (tests, builds, screenshots, manual runs) and how it came out;
+  result is "pass", "fail" or "todo" (planned, not run yet); [] when nothing was checked
+- diagram: the main flow or the pieces the feature touches and how they connect, 3 to 8 nodes, labels
+  at most 4 words, edge labels at most 3 words or ""; null when a picture would not help
+Write fragments, not sentences, except summary: no "I", no "we", no trailing periods. At most 14 words
+per item and 8 items per list, the most important kept. Keep the previous summary's wording for items that
+still hold, drop what is no longer true, never invent anything the material does not show."""
 
 
 def transcript_of(f: dict) -> Path | None:
@@ -1594,37 +1605,110 @@ def ask_model(model: str, system: str, prompt: str, timeout: int = 180) -> dict 
     return got if isinstance(got, dict) else (r.stderr or r.stdout).strip()[:200] or "no JSON in the reply"
 
 
+RECAP_KEYS = ("goal", "summary", "why", "decisions", "tasks", "blockers", "validation", "diagram")
+TASK_STATES = ("done", "doing", "todo")
+CHECK_RESULTS = ("pass", "fail", "todo")
+
+
+def tidy(value, width: int) -> str:
+    return " ".join(str(value).split())[:width].rstrip(" .")
+
+
+def shape_recap(got: dict, prev: dict) -> dict:
+    """The model's reply, held to the recap's shape: lengths capped, unknown states dropped, a diagram
+    only when its edges join its own nodes. done/now/next are kept for older readers (and the retro)."""
+    def rows(key: str, n: int = 8) -> list:
+        v = got.get(key)
+        return v[:n] if isinstance(v, list) else []
+
+    def texts(key: str, width: int = 100) -> list[str]:
+        return [tidy(x, width) for x in rows(key) if isinstance(x, str) and x.strip()]
+
+    decisions = []
+    for d in rows("decisions"):
+        if isinstance(d, str) and d.strip():
+            d = {"choice": d}
+        if isinstance(d, dict) and str(d.get("choice") or "").strip():
+            decisions.append({"choice": tidy(d["choice"], 100), "why": tidy(d.get("why") or "", 120)})
+    tasks = [{"text": tidy(t["text"], 100), "state": t.get("state") if t.get("state") in TASK_STATES else "todo"}
+             for t in rows("tasks", 12) if isinstance(t, dict) and str(t.get("text") or "").strip()]
+    doing = [i for i, t in enumerate(tasks) if t["state"] == "doing"]
+    for i in doing[1:]:
+        tasks[i]["state"] = "todo"
+    order = {s: n for n, s in enumerate(TASK_STATES)}
+    tasks.sort(key=lambda t: order[t["state"]])  # stable: done, doing, todo, each in the model's order
+    checks = [{"check": tidy(c["check"], 100), "result": c.get("result") if c.get("result") in CHECK_RESULTS else "todo"}
+              for c in rows("validation") if isinstance(c, dict) and str(c.get("check") or "").strip()]
+    return {
+        "goal": tidy(got.get("goal") or prev.get("goal", ""), 90),
+        "summary": tidy(got.get("summary") or "", 240),
+        "why": texts("why", 160)[:3],
+        "decisions": decisions,
+        "tasks": tasks,
+        "blockers": texts("blockers"),
+        "validation": checks,
+        "diagram": shape_diagram(got.get("diagram")),
+        "done": [t["text"] for t in tasks if t["state"] == "done"],
+        "now": next((t["text"] for t in tasks if t["state"] == "doing"), ""),
+        "next": [t["text"] for t in tasks if t["state"] == "todo"][:5],
+    }
+
+
+def shape_diagram(d) -> dict | None:
+    """A small graph the app draws: nodes with short labels, edges only between those nodes."""
+    if not isinstance(d, dict) or not isinstance(d.get("nodes"), list):
+        return None
+    nodes, seen = [], set()
+    for n in d["nodes"][:8]:
+        if isinstance(n, dict) and str(n.get("id") or "").strip() and str(n.get("label") or "").strip():
+            nid = str(n["id"]).strip()[:20]
+            if nid not in seen:
+                seen.add(nid)
+                nodes.append({"id": nid, "label": tidy(n["label"], 32)})
+    edges = []
+    for e in d.get("edges") if isinstance(d.get("edges"), list) else []:
+        if isinstance(e, dict) and str(e.get("from", "")).strip() in seen and str(e.get("to", "")).strip() in seen:
+            a, b = str(e["from"]).strip(), str(e["to"]).strip()
+            if a != b:
+                edges.append({"from": a, "to": b, "label": tidy(e.get("label") or "", 24)})
+    return {"nodes": nodes, "edges": edges[:12]} if len(nodes) >= 2 else None
+
+
+def proof_dir(f: dict) -> Path:
+    return feature_dir(f) / "proof"
+
+
+def proof_list(f: dict) -> list[dict]:
+    """The feature's validation screenshots, oldest first: [{file, caption, at}], files that still exist."""
+    d = proof_dir(f)
+    rows = read_json(d / "proof.json", [])
+    return [r for r in rows if isinstance(r, dict) and (d / str(r.get("file", "_"))).is_file()] if isinstance(rows, list) else []
+
+
 def write_recap(f: dict, prev: dict, force: bool) -> tuple[dict, str]:
     """Ask a small model for the recap; returns it and what happened."""
     t = transcript_of(f)
     g = git_facts(f)
-    source = f"{t.stat().st_size if t else 0}:{g['head']}:{g['dirty']}"
+    proof = proof_list(f)
+    source = f"{t.stat().st_size if t else 0}:{g['head']}:{g['dirty']}:{len(proof)}"
     if not force and prev.get("source") == source:
         return prev, "up to date"
     task, tail = conversation(t) if t else ("", "")
     brief = next((p.read_text() for p in (feature_dir(f) / "brief.md", feature_dir(f) / "brief.sent.md") if p.exists()), "")
     commits = "\n".join(f"- {c}" for c in g["commits"][:20]) or "none"
     files = ", ".join(g["files"][:15]) + (f" (+{len(g['files']) - 15} more)" if len(g["files"]) > 15 else "")
-    old = {k: prev[k] for k in ("goal", "done", "now", "next", "decisions", "blockers") if k in prev}
+    shots = "\n".join(f"- {r.get('caption') or r['file']}" for r in proof[-8:]) or "none"
+    old = {k: prev[k] for k in RECAP_KEYS if k in prev}
     prompt = (f"Feature: {f['name']}{' (' + f['ticket'] + ')' if f.get('ticket') else ''} — {f.get('title') or f['name']}\n\n"
-              f"Task as given:\n{(brief or task)[:1500] or 'not recorded'}\n\n"
+              f"Task as given:\n{(brief or task)[:3000] or 'not recorded'}\n\n"
               f"Commits on the branch:\n{commits}\n\nFiles touched: {files or 'none'}\n\n"
-              f"Previous recap: {json.dumps(old) if old else 'none'}\n\n"
+              f"Screenshots kept as proof (grove proof):\n{shots}\n\n"
+              f"Previous summary: {json.dumps(old) if old else 'none'}\n\n"
               f"Conversation, latest last:\n{tail or 'none yet'}")
     got = ask_model(RECAP_MODEL, RECAP_SYSTEM, prompt)
     if isinstance(got, str):
         return prev, f"failed: {got}"
-
-    def tidy(value, width: int) -> str:
-        return " ".join(str(value).split())[:width].rstrip(" .")
-
-    def items(key: str) -> list[str]:
-        rows = got.get(key) if isinstance(got.get(key), list) else []
-        return [tidy(x, 70) for x in rows if str(x).strip()][:5]
-
-    recap = {"goal": tidy(got.get("goal") or prev.get("goal", ""), 90), "done": items("done"),
-             "now": tidy(got.get("now") or "", 70), "next": items("next"), "decisions": items("decisions"),
-             "blockers": items("blockers"), "commits": len(g["commits"]), "files": len(g["files"]),
+    recap = {**shape_recap(got, prev), "commits": len(g["commits"]), "files": len(g["files"]),
              "updatedAt": int(time.time() * 1000), "source": source}
     write_json(feature_dir(f) / "recap.json", recap)
     return recap, "written"
@@ -1666,7 +1750,7 @@ def cmd_recap(args: list[str]) -> None:
     if what.startswith("failed"):
         die(f"recap of {f['name']} {what}")
     print(f"{f['name']}: recap {what}")
-    print(json.dumps({k: recap.get(k) for k in ("goal", "done", "now", "next", "decisions", "blockers")}, indent=2, ensure_ascii=False))
+    print(json.dumps({k: recap.get(k) for k in RECAP_KEYS}, indent=2, ensure_ascii=False))
 
 
 RETRO_SYSTEM = """You write the retro for one feature that a developer built together with a Claude Code agent.
@@ -1828,6 +1912,47 @@ def cmd_shot(args: list[str]) -> None:
         return
     type_into_claude(f, f"{dest} {note}".rstrip() + ("" if note or "--send" in flags else " "), enter=bool(note) or "--send" in flags)
     print(f"{f['name']}: {'sent' if note or '--send' in flags else 'pasted'} {dest.name} to Claude")
+
+
+def cmd_proof(args: list[str]) -> None:
+    """Keep a screenshot that shows the feature working (a UI check, a test run, a before/after) with a
+    caption; the Summary tab shows them under Validation and the recap counts them as checks."""
+    flags = {a for a in args if a in ("--clip", "--ls", "--json")}
+    words = [a for a in args if a not in flags]
+    if not words:
+        die("proof <name> (<image> | --clip) [caption…] · proof <name> --ls [--json]")
+    f = feature(words.pop(0))
+    if "--ls" in flags:
+        rows = proof_list(f)
+        if "--json" in flags:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+        for r in [] if "--json" in flags else rows:
+            print(f"{proof_dir(f) / r['file']}  {r.get('caption', '')}".rstrip())
+        return
+    src = Path(words[0]).expanduser() if words and Path(words[0]).expanduser().is_file() else None
+    d = proof_dir(f)
+    d.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if src:
+        words.pop(0)
+        if src.suffix.lower() not in IMAGE_EXTS:
+            die(f"{src}: not an image ({', '.join(sorted(IMAGE_EXTS))})")
+        ext = src.suffix.lower()
+    elif "--clip" in flags:
+        ext = ".png"
+    else:
+        die(f"{words[0] if words else 'no image'}: pass an image file, or --clip for the clipboard's image")
+    dest, n = d / f"{stamp}{ext}", 1
+    while dest.exists():
+        n += 1
+        dest = d / f"{stamp}-{n}{ext}"
+    if src:
+        shutil.copyfile(src, dest)
+    elif not clipboard_image(dest):
+        die("the clipboard holds no image (take one with ⌃⇧⌘4, or copy an image first)")
+    caption = " ".join(" ".join(words).split())[:200]
+    write_json(d / "proof.json", proof_list(f) + [{"file": dest.name, "caption": caption, "at": int(time.time() * 1000)}])
+    print(f"{f['name']}: kept {dest.name} as proof{f' — {caption}' if caption else ''}")
 
 
 def cmd_agent(name: str) -> None:
@@ -2968,6 +3093,8 @@ def main(argv: list[str]) -> None:
         cmd_send(rest[0], " ".join(rest[1:]))
     elif cmd == "shot":
         cmd_shot(rest)
+    elif cmd == "proof":
+        cmd_proof(rest)
     elif cmd == "keepawake":
         cmd_keepawake(rest)
     elif cmd == "update":
