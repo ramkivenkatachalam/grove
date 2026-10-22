@@ -559,6 +559,18 @@ function tasksOf(r) {
 const decisionsOf = (r) => asList(r.decisions).map((d) => (typeof d === 'string' ? { choice: d, why: '' } : d)).filter((d) => d?.choice)
 const TASK_LOOK = { done: { glyph: '✓', word: 'done' }, doing: { glyph: '▸', word: 'now' }, todo: { glyph: '○', word: 'to do' } }
 const CHECK_LOOK = { pass: { glyph: '✓', word: 'passed' }, fail: { glyph: '✗', word: 'failed' }, todo: { glyph: '○', word: 'not run yet' } }
+const RISK_LOOK = { reach: 'Reaches', assumption: 'If an assumption is wrong', rollout: 'Rollout' }
+const risksOf = (r) => asList(r.risks).map((x) => (typeof x === 'string' ? { kind: 'reach', text: x } : x)).filter((x) => x?.text)
+
+// one of the summary's four questions: a numbered heading, then what answers it
+function RecapSection({ n, title, children }) {
+  return (
+    <div className="recap-block recap-section" role="group" aria-label={title}>
+      <h3 className="recap-q"><span className="recap-n" aria-hidden="true">{n}</span> {title}</h3>
+      {children}
+    </div>
+  )
+}
 
 // the diagram from the recap, laid out in columns: each node one step right of everything that points at it
 const NODE_W = 156, NODE_H = 40, ROW_GAP = 16, PAD = 8
@@ -707,12 +719,30 @@ function Recap({ f, pal }) {
     setBusy(false)
     if (res.code) setError((res.stderr || res.stdout).trim().replace(/^grove: /, ''))
   }
+  // the same Markdown as `grove recap <name> --markdown`, ready for a PR description
+  const [copied, setCopied] = useState('')
+  const copy = async () => {
+    const res = await hub.grove(['recap', f.name, '--markdown'])
+    if (res.code) return setError((res.stderr || res.stdout).trim().replace(/^grove: /, ''))
+    try {
+      await navigator.clipboard.writeText(res.stdout)
+      setCopied('Copied')
+    } catch {
+      setCopied('Copy failed')
+    }
+    setTimeout(() => setCopied(''), 2500)
+  }
   const tasks = r ? tasksOf(r) : []
   const done = tasks.filter((t) => t.state === 'done').length
   const decisions = r ? decisionsOf(r) : []
   const checks = asList(r?.validation)
+  const unverified = asList(r?.unverified)
+  const risks = r ? risksOf(r) : []
+  const focus = asList(r?.focus)
   const shots = asList(f.proof).slice(-6).reverse()
   const checkColour = { pass: pal.ready, fail: '#ff9b9b', todo: 'var(--text-3)' }
+  // a recap written before the review sections has none of their keys: say so rather than "none"
+  const older = r && !('risks' in r)
   return (
     <section className="recap" aria-label="Summary">
       <div className="recap-head">
@@ -721,29 +751,73 @@ function Recap({ f, pal }) {
           {r?.summary && r.goal && <span className="recap-sub">{r.goal}</span>}
         </div>
         {r?.updatedAt && <span className="recap-age">updated {ago(r.updatedAt)}</span>}
+        {r && <button className="btn" onClick={copy} aria-label="Copy the summary as a pull request description in Markdown">{copied ? `⧉ ${copied}` : '⧉ Copy as PR description'}</button>}
         <button className="btn" onClick={refresh} disabled={busy} aria-label="Refresh the summary">{busy ? '↻ Refreshing…' : '↻ Refresh'}</button>
       </div>
       {error && <p className="recap-error" role="alert">Could not refresh: {error}</p>}
+      {copied && <span className="sr-only" role="status">{copied}</span>}
       {!r && <p className="busy">{busy ? 'Reading the conversation and git…' : 'Written after Claude’s next turn, or now with Refresh.'}</p>}
+      {older && <p className="recap-none">This summary predates the approach and review sections — Refresh to add them.</p>}
       {r && (
         <>
-          {(asList(r.why).length > 0 || decisions.length > 0) && (
-            <div className="recap-grid">
-              <RecapList glyph="?" word="Why" items={asList(r.why)} />
-              {decisions.length > 0 && (
-                <div className="recap-block">
-                  <h3><span aria-hidden="true">◆</span> Key decisions</h3>
-                  <ul>{decisions.map((d, i) => <li key={i}><b>{d.choice}</b>{d.why && <span className="dim"> — {d.why}</span>}</li>)}</ul>
-                </div>
-              )}
-            </div>
-          )}
-          {r.diagram?.nodes?.length > 1 && (
-            <div className="recap-block">
-              <h3><span aria-hidden="true">⇢</span> How it fits</h3>
-              <Diagram diagram={r.diagram} pal={pal} />
-            </div>
-          )}
+          <RecapSection n="1" title="Why">
+            {asList(r.why).length ? <ul>{asList(r.why).map((x, i) => <li key={i}>{x}</li>)}</ul> : <p className="recap-none">not recorded yet</p>}
+            {r.change?.before && (
+              <dl className="recap-change">
+                <dt>Before</dt><dd>{r.change.before}</dd>
+                <dt>After</dt><dd>{r.change.after}</dd>
+              </dl>
+            )}
+          </RecapSection>
+          <RecapSection n="2" title="Approach">
+            {r.approach && <p className="recap-prose">{r.approach}</p>}
+            {r.diagram?.nodes?.length > 1 && <Diagram diagram={r.diagram} pal={pal} />}
+            {r.example && <p className="recap-prose"><span className="recap-label">Example</span> {r.example}</p>}
+            {decisions.length > 0 && (
+              <div className="recap-block">
+                <h4><span aria-hidden="true">◆</span> Key decisions</h4>
+                <ul>{decisions.map((d, i) => <li key={i}><b>{d.choice}</b>{d.why && <span className="dim"> — {d.why}</span>}</li>)}</ul>
+              </div>
+            )}
+            {!r.approach && !decisions.length && !(r.diagram?.nodes?.length > 1) && <p className="recap-none">not recorded yet</p>}
+          </RecapSection>
+          <RecapSection n="3" title="How we know it works">
+            {checks.length > 0 && (
+              <ul className="tasks">
+                {checks.map((c, i) => {
+                  const look = CHECK_LOOK[c.result] || CHECK_LOOK.todo
+                  return (
+                    <li key={i}>
+                      <span className="task-glyph" aria-hidden="true" style={{ color: checkColour[c.result] || checkColour.todo }}>{look.glyph}</span>
+                      <span>{c.check} <span className="check-word" style={{ color: checkColour[c.result] || checkColour.todo }}>{look.word}</span></span>
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+            {unverified.length > 0 && (
+              <div className="recap-block">
+                <h4 style={{ color: pal.waiting }}><span aria-hidden="true">○</span> Not verified</h4>
+                <ul>{unverified.map((x, i) => <li key={i}>{x}</li>)}</ul>
+              </div>
+            )}
+            {shots.length > 0 && <ul className="proof">{shots.map((s) => <ProofShot key={s.file} f={f} shot={s} />)}</ul>}
+            {!checks.length && !shots.length && <p className="recap-none">nothing checked yet — screenshots kept with <code>grove proof {f.name} &lt;image&gt; &lt;what it shows&gt;</code> appear here</p>}
+          </RecapSection>
+          <RecapSection n="4" title="Risks and reviewer focus">
+            {risks.length > 0 && (
+              <ul className="recap-risks">
+                {risks.map((x, i) => <li key={i}><b>{RISK_LOOK[x.kind] || RISK_LOOK.reach}:</b> {x.text}</li>)}
+              </ul>
+            )}
+            {focus.length > 0 && (
+              <div className="recap-block">
+                <h4><span aria-hidden="true">◎</span> Look hardest at</h4>
+                <ol>{focus.map((x, i) => <li key={i}>{x}</li>)}</ol>
+              </div>
+            )}
+            {!risks.length && !focus.length && <p className="recap-none">{older ? 'not in this summary yet' : 'none found in the work so far'}</p>}
+          </RecapSection>
           <div className="recap-grid">
             <div className="recap-block">
               <h3><span aria-hidden="true">☑</span> Tasks{tasks.length > 0 && <span className="recap-count"> {done} of {tasks.length} done</span>}</h3>
@@ -766,25 +840,10 @@ function Recap({ f, pal }) {
           </div>
         </>
       )}
-      {(r || shots.length > 0) && (
-        <div className="recap-block">
-          <h3><span aria-hidden="true">✓</span> Validation</h3>
-          {checks.length > 0 && (
-            <ul className="tasks">
-              {checks.map((c, i) => {
-                const look = CHECK_LOOK[c.result] || CHECK_LOOK.todo
-                return (
-                  <li key={i}>
-                    <span className="task-glyph" aria-hidden="true" style={{ color: checkColour[c.result] || checkColour.todo }}>{look.glyph}</span>
-                    <span>{c.check} <span className="check-word" style={{ color: checkColour[c.result] || checkColour.todo }}>{look.word}</span></span>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-          {shots.length > 0 && <ul className="proof">{shots.map((s) => <ProofShot key={s.file} f={f} shot={s} />)}</ul>}
-          {!checks.length && !shots.length && <p className="recap-none">nothing checked yet — screenshots kept with <code>grove proof {f.name} &lt;image&gt; &lt;what it shows&gt;</code> appear here</p>}
-        </div>
+      {!r && shots.length > 0 && (
+        <RecapSection n="3" title="How we know it works">
+          <ul className="proof">{shots.map((s) => <ProofShot key={s.file} f={f} shot={s} />)}</ul>
+        </RecapSection>
       )}
     </section>
   )

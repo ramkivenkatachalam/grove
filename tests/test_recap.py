@@ -42,6 +42,26 @@ class ShapeRecap(unittest.TestCase):
         self.assertEqual(grove.shape_recap({}, {"goal": "old goal"})["goal"], "old goal")
         self.assertEqual(grove.shape_recap({"diagram": "boxes"}, {})["diagram"], None)
 
+    def test_risks_keep_known_kinds_and_take_strings(self):
+        r = grove.shape_recap({"risks": [{"kind": "rollout", "text": "index migration runs before deploy."},
+                                         {"kind": "vibes", "text": "odd kind"}, "plain string", {"kind": "reach"}],
+                               "focus": ["a", "b", "c", "d"], "unverified": ["no manual run"]}, {})
+        self.assertEqual(r["risks"], [{"kind": "rollout", "text": "index migration runs before deploy"},
+                                      {"kind": "reach", "text": "odd kind"}, {"kind": "reach", "text": "plain string"}])
+        self.assertEqual(r["focus"], ["a", "b", "c"])
+        self.assertEqual(r["unverified"], ["no manual run"])
+
+    def test_change_needs_both_sides_and_approach_must_be_text(self):
+        r = grove.shape_recap({"change": {"before": "any user read any file"}, "approach": ["not", "text"]}, {})
+        self.assertEqual((r["change"], r["approach"], r["example"]), (None, "", ""))
+        r = grove.shape_recap({"change": {"before": "open", "after": "tenant only"}, "approach": "one gate."}, {})
+        self.assertEqual((r["change"], r["approach"]), ({"before": "open", "after": "tenant only"}, "one gate"))
+
+    def test_nothing_shown_means_empty_review_sections(self):
+        r = grove.shape_recap({}, {})
+        self.assertEqual([r[k] for k in ("risks", "focus", "unverified", "change", "approach", "example")],
+                         [[], [], [], None, "", ""])
+
     def test_diagram_keeps_only_edges_between_its_nodes(self):
         d = grove.shape_diagram({"nodes": [{"id": "a", "label": "CLI"}, {"id": "b", "label": "recap.json"}, {"id": "a", "label": "dup"}],
                                  "edges": [{"from": "a", "to": "b", "label": "writes"}, {"from": "a", "to": "z"}, {"from": "b", "to": "b"}]})
@@ -49,6 +69,43 @@ class ShapeRecap(unittest.TestCase):
                              "edges": [{"from": "a", "to": "b", "label": "writes"}]})
         self.assertIsNone(grove.shape_diagram({"nodes": [{"id": "a", "label": "alone"}], "edges": []}))
         self.assertIsNone(grove.shape_diagram(None))
+
+
+class Markdown(unittest.TestCase):
+    FULL = {
+        "summary": "Storage downloads scoped to the caller's tenant",
+        "why": ["Any logged-in user could read another tenant's files"],
+        "change": {"before": "any storage URL read", "after": "own tenant only"},
+        "approach": "One gate in front of every download route",
+        "example": "customer 5283 reads file_uploads/5283/x.pdf, not file_uploads/6000/x.pdf",
+        "decisions": [{"choice": "url as str", "why": "matches stored runs"}],
+        "diagram": {"nodes": [{"id": "a", "label": "parse URL"}, {"id": "b", "label": "403"}, {"id": "c", "label": "staff"}],
+                    "edges": [{"from": "a", "to": "b", "label": "fail"}]},
+        "validation": [{"check": "router tests", "result": "pass"}, {"check": "deploy", "result": "todo"}],
+        "unverified": ["no manual run against staging"],
+        "risks": [{"kind": "rollout", "text": "index migration must run first"}],
+        "focus": ["the staff bypass"],
+        "tasks": [{"text": "merge", "state": "todo"}, {"text": "write gate", "state": "done"}],
+        "blockers": [],
+    }
+
+    def test_four_sections_in_order(self):
+        md = grove.recap_markdown(self.FULL, [{"file": "1.png", "caption": "403 for another tenant"}])
+        heads = [ln for ln in md.splitlines() if ln.startswith("## ")]
+        self.assertEqual(heads, ["## Why", "## Approach", "## How we know it works", "## Risks and reviewer focus", "## Still to do"])
+        for want in ("**Before:** any storage URL read.", "parse URL --fail--> 403\nstaff\n", "Example: customer 5283",
+                     "- url as str — matches stored runs", "✅ passed: router tests", "⬜ not run yet: deploy",
+                     "📷 Screenshot: 403 for another tenant", "Not verified:\n- no manual run against staging.",
+                     "**Rollout:** index migration must run first.", "1. the staff bypass.", "- [ ] merge"):
+            self.assertIn(want, md)
+        self.assertNotIn("write gate", md)
+
+    def test_old_recap_still_prints_and_gaps_say_so(self):
+        md = grove.recap_markdown({"goal": "g", "summary": "does a thing", "why": ["w"], "done": ["x"]}, [])
+        self.assertIn("## Approach\ndoes a thing.", md)
+        self.assertIn("## How we know it works\n_Nothing recorded yet._", md)
+        self.assertIn("_None found in the work so far._", md)
+        self.assertNotIn("Still to do", md)
 
 
 class Proof(unittest.TestCase):

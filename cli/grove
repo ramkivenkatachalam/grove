@@ -43,9 +43,11 @@ per feature, for any project described by a project config (see `grove project`)
                          --print only prints the saved path
   grove proof <name> (<image> | --clip) [caption…]   keep a screenshot that shows the feature working;
                          the Summary tab shows it under Validation (--ls [--json] lists them)
-  grove recap <name> [--force] [--bg]   the feature's summary (one line, why, decisions, task list,
-                         blockers, validation, a diagram), written to its recap.json; sessions refresh
-                         it after each turn, at most every few minutes; --bg returns at once
+  grove recap <name> [--force] [--bg] [--markdown]   the feature's summary: why, the approach (with an
+                         example and a diagram), how we know it works, risks and where a reviewer should
+                         look, then the task list; written to its recap.json; sessions refresh it after
+                         each turn, at most every few minutes; --bg returns at once; --markdown prints
+                         it as a PR description (gh pr create --body "$(grove recap <name> --markdown)")
 
   grove project ls                       projects and which one is the default
   grove project add <repo> [--name N]    register a repo (reads its .grove.json, or writes a starter)
@@ -67,7 +69,7 @@ Everything lives under ~/.grove, one folder per project and per feature:
   ~/.grove/projects/<project>/<feature>/feature.json  the registry entry
                                        /status.json   written by the Claude Code mod
                                        /brief.md      the task, until the agent picks it up
-                                       /recap.json    summary, why, tasks, diagram… (grove recap)
+                                       /recap.json    why, approach, checks, risks… (grove recap)
                                        /notes.md      the Summary tab's scratchpad
                                        /retro.md      grove retro, then yours to edit
                                        /shots/        screenshots handed to the agent (grove shot)
@@ -1514,25 +1516,55 @@ def rebuild_app(relaunch: bool, install_deps: bool) -> None:
         print("app: reopened")
 
 
-RECAP_SYSTEM = """You keep the summary of one coding feature that its developer reads to catch up in a minute.
+RECAP_SYSTEM = """You keep the summary of one coding feature. Its developer reads it to catch up in a minute, and
+pastes it as the pull request description, so a reviewer who has never seen the work understands it.
+It answers four questions, in this order: why, the approach, how we know it works, risks and where to look.
 Reply with JSON only, no prose and no code fence:
-{"goal": "...", "summary": "...", "why": ["..."], "decisions": [{"choice": "...", "why": "..."}],
- "tasks": [{"text": "...", "state": "done"}], "blockers": ["..."], "validation": [{"check": "...", "result": "pass"}],
- "diagram": {"nodes": [{"id": "a", "label": "..."}], "edges": [{"from": "a", "to": "b", "label": "..."}]}}
+{"goal": "...", "summary": "...",
+ "why": ["..."], "change": {"before": "...", "after": "..."},
+ "approach": "...", "example": "...", "decisions": [{"choice": "...", "why": "..."}],
+ "diagram": {"nodes": [{"id": "a", "label": "..."}], "edges": [{"from": "a", "to": "b", "label": "..."}]},
+ "validation": [{"check": "...", "result": "pass"}], "unverified": ["..."],
+ "risks": [{"kind": "reach", "text": "..."}], "focus": ["..."],
+ "tasks": [{"text": "...", "state": "done"}], "blockers": ["..."]}
 - goal: what the feature is for, at most 10 words
 - summary: one sentence, at most 30 words: what the feature does and where it stands
-- why: the motivation, the problem it solves for whom; 1 to 3 items
-- decisions: key design choices someone picking this up must know, each with its reason
+WHY
+- why: what was wrong or missing and who it affects, concrete (the endpoint, the screen, the user);
+  1 to 3 items
+- change: for a fix or a behaviour change, what a user or caller saw before and sees after, one short
+  sentence each, not repeating why; null otherwise
+APPROACH
+- approach: the high-level design in 1 to 3 plain sentences, at most 60 words: the one idea, where it
+  sits and what it does. No file-by-file walkthrough
+- example: one concrete case that shows the approach working, with the real values the material uses
+  (ids, paths, commands, inputs) and what happens to each, at most 30 words; "" when the material gives none
+- decisions: key design choices a reviewer must know, each with its reason; "" as the reason when the
+  material does not give one
+- diagram: when the change adds a check, a gate or a branch, the path an input takes through it, step by
+  step, with each outcome (allowed, 403, error) as a node; otherwise the pieces and how they connect.
+  3 to 8 nodes, labels at most 4 words, edge labels at most 3 words or ""; null when a picture would not help
+HOW WE KNOW IT WORKS
+- validation: the checks that ran (tests with their size, CI, builds, screenshots, manual runs, review
+  findings fixed) and how each came out; result is "pass", "fail" or "todo" (planned, not run yet)
+- unverified: what was not checked that a reviewer could expect to be (a path with no test, no manual run,
+  no screenshot of a UI change); [] when the material does not show a gap
+RISKS AND REVIEWER FOCUS
+- risks: kind is "reach" (callers, routes, data or users the change touches), "assumption" (a case the
+  change does not cover or an assumption it rests on, and who then gets a different result than before)
+  or "rollout" (migrations, flags, config or ordering needed at deploy, and what happens if skipped)
+- focus: the 1 to 3 places a reviewer should look hardest, each naming the code or the question
+Only risks the material shows: the files and diff sizes, the conversation, review findings, migrations.
+No generic risks ("may have bugs", "needs testing"). [] when there is no evidence; never guess.
+PROGRESS
 - tasks: the work as a checklist, done first (oldest first), then the one in progress, then what is next
   (most urgent first); state is "done", "doing" or "todo"; at most one "doing"
 - blockers: what stops progress or waits on the developer; [] when nothing does
-- validation: how the work was checked (tests, builds, screenshots, manual runs) and how it came out;
-  result is "pass", "fail" or "todo" (planned, not run yet); [] when nothing was checked
-- diagram: the main flow or the pieces the feature touches and how they connect, 3 to 8 nodes, labels
-  at most 4 words, edge labels at most 3 words or ""; null when a picture would not help
-Write fragments, not sentences, except summary: no "I", no "we", no trailing periods. At most 14 words
-per item and 8 items per list, the most important kept. Keep the previous summary's wording for items that
-still hold, drop what is no longer true, never invent anything the material does not show."""
+why, change, approach, example, unverified, risks and focus are short plain sentences a reviewer reads;
+the rest are fragments: no "I", no "we", no trailing periods. At most 14 words per fragment, 30 per
+sentence item, and 8 items per list, the most important kept. Name real things (functions, routes,
+commands) as the material names them. Keep the previous summary's wording for items that still hold, drop
+what is no longer true, never invent anything the material does not show."""
 
 
 def transcript_of(f: dict) -> Path | None:
@@ -1583,7 +1615,15 @@ def git_facts(f: dict) -> dict:
     committed = run(["git", "-C", path, "diff", "--name-only", f"{base}...HEAD"]).stdout.splitlines()
     dirty = [ln[3:] for ln in run(["git", "-C", path, "status", "--porcelain"]).stdout.splitlines()]
     head = run(["git", "-C", path, "rev-parse", "HEAD"]).stdout.strip()
-    return {"commits": commits, "files": sorted(set(committed) | set(dirty)), "dirty": len(dirty), "head": head}
+    # lines added and removed per file, uncommitted edits included: how big each change is
+    fork = run(["git", "-C", path, "merge-base", base, "HEAD"]).stdout.strip()
+    sizes = {}
+    for ln in run(["git", "-C", path, "diff", "--numstat", fork]).stdout.splitlines() if fork else []:
+        added, removed, name = (ln.split("\t", 2) + ["", ""])[:3]
+        if name:
+            sizes[name] = f"+{added} -{removed}" if added != "-" else "binary"
+    return {"commits": commits, "files": sorted(set(committed) | set(dirty)), "dirty": len(dirty), "head": head,
+            "sizes": sizes}
 
 
 def ask_model(model: str, system: str, prompt: str, timeout: int = 180) -> dict | str:
@@ -1605,9 +1645,11 @@ def ask_model(model: str, system: str, prompt: str, timeout: int = 180) -> dict 
     return got if isinstance(got, dict) else (r.stderr or r.stdout).strip()[:200] or "no JSON in the reply"
 
 
-RECAP_KEYS = ("goal", "summary", "why", "decisions", "tasks", "blockers", "validation", "diagram")
+RECAP_KEYS = ("goal", "summary", "why", "change", "approach", "example", "decisions", "diagram", "validation",
+              "unverified", "risks", "focus", "tasks", "blockers")
 TASK_STATES = ("done", "doing", "todo")
 CHECK_RESULTS = ("pass", "fail", "todo")
+RISK_KINDS = ("reach", "assumption", "rollout")
 
 
 def tidy(value, width: int) -> str:
@@ -1639,15 +1681,32 @@ def shape_recap(got: dict, prev: dict) -> dict:
     tasks.sort(key=lambda t: order[t["state"]])  # stable: done, doing, todo, each in the model's order
     checks = [{"check": tidy(c["check"], 100), "result": c.get("result") if c.get("result") in CHECK_RESULTS else "todo"}
               for c in rows("validation") if isinstance(c, dict) and str(c.get("check") or "").strip()]
+    risks = []
+    for x in rows("risks"):
+        if isinstance(x, str) and x.strip():
+            x = {"text": x}
+        if isinstance(x, dict) and str(x.get("text") or "").strip():
+            # a kind the app has no word for is still a risk: it shows under "where it reaches"
+            risks.append({"kind": x.get("kind") if x.get("kind") in RISK_KINDS else "reach", "text": tidy(x["text"], 240)})
+    change = got.get("change")
+    change = ({"before": tidy(change.get("before") or "", 200), "after": tidy(change.get("after") or "", 200)}
+              if isinstance(change, dict) and str(change.get("before") or "").strip() and str(change.get("after") or "").strip()
+              else None)
     return {
         "goal": tidy(got.get("goal") or prev.get("goal", ""), 90),
         "summary": tidy(got.get("summary") or "", 240),
-        "why": texts("why", 160)[:3],
+        "why": texts("why", 240)[:3],
+        "change": change,
+        "approach": tidy(got.get("approach") or "", 480) if isinstance(got.get("approach"), str) else "",
+        "example": tidy(got.get("example") or "", 240) if isinstance(got.get("example"), str) else "",
         "decisions": decisions,
+        "diagram": shape_diagram(got.get("diagram")),
+        "validation": checks,
+        "unverified": texts("unverified", 200)[:5],
+        "risks": risks,
+        "focus": texts("focus", 200)[:3],
         "tasks": tasks,
         "blockers": texts("blockers"),
-        "validation": checks,
-        "diagram": shape_diagram(got.get("diagram")),
         "done": [t["text"] for t in tasks if t["state"] == "done"],
         "now": next((t["text"] for t in tasks if t["state"] == "doing"), ""),
         "next": [t["text"] for t in tasks if t["state"] == "todo"][:5],
@@ -1690,18 +1749,21 @@ def write_recap(f: dict, prev: dict, force: bool) -> tuple[dict, str]:
     t = transcript_of(f)
     g = git_facts(f)
     proof = proof_list(f)
-    source = f"{t.stat().st_size if t else 0}:{g['head']}:{g['dirty']}:{len(proof)}"
+    # the shape's version is part of it, so a recap written before the review sections is rewritten
+    source = f"r2:{t.stat().st_size if t else 0}:{g['head']}:{g['dirty']}:{len(proof)}"
     if not force and prev.get("source") == source:
         return prev, "up to date"
     task, tail = conversation(t) if t else ("", "")
     brief = next((p.read_text() for p in (feature_dir(f) / "brief.md", feature_dir(f) / "brief.sent.md") if p.exists()), "")
     commits = "\n".join(f"- {c}" for c in g["commits"][:20]) or "none"
-    files = ", ".join(g["files"][:15]) + (f" (+{len(g['files']) - 15} more)" if len(g["files"]) > 15 else "")
+    sizes = g.get("sizes", {})
+    files = ", ".join(f"{n} ({sizes[n]})" if n in sizes else n for n in g["files"][:20])
+    files += f" (+{len(g['files']) - 20} more)" if len(g["files"]) > 20 else ""
     shots = "\n".join(f"- {r.get('caption') or r['file']}" for r in proof[-8:]) or "none"
     old = {k: prev[k] for k in RECAP_KEYS if k in prev}
     prompt = (f"Feature: {f['name']}{' (' + f['ticket'] + ')' if f.get('ticket') else ''} — {f.get('title') or f['name']}\n\n"
               f"Task as given:\n{(brief or task)[:3000] or 'not recorded'}\n\n"
-              f"Commits on the branch:\n{commits}\n\nFiles touched: {files or 'none'}\n\n"
+              f"Commits on the branch:\n{commits}\n\nFiles touched (lines added and removed): {files or 'none'}\n\n"
               f"Screenshots kept as proof (grove proof):\n{shots}\n\n"
               f"Previous summary: {json.dumps(old) if old else 'none'}\n\n"
               f"Conversation, latest last:\n{tail or 'none yet'}")
@@ -1714,12 +1776,79 @@ def write_recap(f: dict, prev: dict, force: bool) -> tuple[dict, str]:
     return recap, "written"
 
 
+RISK_WORDS = {"reach": "Reaches", "assumption": "If an assumption is wrong", "rollout": "Rollout"}
+CHECK_MARKS = {"pass": "✅ passed", "fail": "❌ failed", "todo": "⬜ not run yet"}
+
+
+def diagram_text(d: dict) -> list[str]:
+    """The diagram as lines a code block can hold: `a --label--> b`, then any node no edge reaches."""
+    name = {n["id"]: n["label"] for n in d.get("nodes", [])}
+    lines = [f"{name[e['from']]} --{e['label']}--> {name[e['to']]}" if e.get("label") else f"{name[e['from']]} --> {name[e['to']]}"
+             for e in d.get("edges", []) if e.get("from") in name and e.get("to") in name]
+    joined = {e.get(k) for e in d.get("edges", []) for k in ("from", "to")}
+    return lines + [label for nid, label in name.items() if nid not in joined]
+
+
+def recap_markdown(r: dict, proof: list[dict]) -> str:
+    """The recap as a pull request description: the four questions in order, then what is left.
+    A recap from before the review sections still prints: its summary stands in for the approach."""
+    def lst(key: str) -> list:
+        return r.get(key) if isinstance(r.get(key), list) else []
+
+    def end(text: str) -> str:  # the recap keeps sentences without their full stop; a description wants it
+        return text if not text or text[-1] in ".!?)`\"'" else text + "."
+
+    none = "_Nothing recorded yet._"
+    out = [end(r.get("summary") or r.get("goal") or ""), "", "## Why"]
+    out += [f"- {end(x)}" for x in lst("why")] or [none]
+    change = r.get("change")
+    if isinstance(change, dict) and change.get("before"):
+        out += ["", f"**Before:** {end(change['before'])}  ", f"**After:** {end(change.get('after', ''))}"]
+    out += ["", "## Approach"]
+    approach = r.get("approach") or ("" if lst("decisions") or r.get("diagram") else r.get("summary", ""))
+    out += [end(approach)] if approach else []
+    if isinstance(r.get("diagram"), dict) and diagram_text(r["diagram"]):
+        out += ["", "```", *diagram_text(r["diagram"]), "```"]
+    if r.get("example"):
+        out += ["", f"Example: {end(r['example'])}"]
+    decisions = [d if isinstance(d, dict) else {"choice": d} for d in lst("decisions")]
+    if decisions:
+        out += ["", "Key decisions:"]
+        out += [f"- {d.get('choice', '')}" + (f" — {d['why']}" if d.get("why") else "") for d in decisions if d.get("choice")]
+    if not (approach or decisions or r.get("diagram")):
+        out += [none]
+    out += ["", "## How we know it works"]
+    checks = [f"- {CHECK_MARKS.get(c.get('result'), CHECK_MARKS['todo'])}: {c.get('check', '')}" for c in lst("validation")]
+    checks += [f"- 📷 Screenshot: {p.get('caption') or p.get('file')}" for p in proof]
+    out += checks or [none]
+    if lst("unverified"):
+        out += ["", "Not verified:"] + [f"- {end(x)}" for x in lst("unverified")]
+    out += ["", "## Risks and reviewer focus"]
+    risks = [x if isinstance(x, dict) else {"text": x} for x in lst("risks")]
+    out += [f"- **{RISK_WORDS.get(x.get('kind'), RISK_WORDS['reach'])}:** {end(x.get('text', ''))}" for x in risks if x.get("text")]
+    if lst("focus"):
+        out += ["", "Look hardest at:"] + [f"{i}. {end(x)}" for i, x in enumerate(lst("focus"), 1)]
+    if not risks and not lst("focus"):
+        out += ["_None found in the work so far._"]
+    left = [t["text"] for t in lst("tasks") if isinstance(t, dict) and t.get("state") != "done" and t.get("text")]
+    if left or lst("blockers"):
+        out += ["", "## Still to do"] + [f"- ❗ {x}" for x in lst("blockers")] + [f"- [ ] {x}" for x in left]
+    return "\n".join(out).strip() + "\n"
+
+
 def cmd_recap(args: list[str]) -> None:
     names = [a for a in args if not a.startswith("--")]
     if not names:
-        die("recap <name> [--force] [--bg]")
+        die("recap <name> [--force] [--bg] [--markdown]")
     f = feature(names[0])
     force = "--force" in args
+    if "--markdown" in args and not force:
+        # the recap as it stands, for gh pr create --body; --force refreshes it first
+        recap = read_json(feature_dir(f) / "recap.json", {})
+        if not recap:
+            die(f"{f['name']} has no recap yet: grove recap {f['name']} --force --markdown writes one")
+        print(recap_markdown(recap, proof_list(f)), end="")
+        return
     if "--bg" in args:
         # detached, so a session's turn never waits on it; it spaces itself out (--wait)
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "recap", f["name"], "--wait", *(["--force"] if force else [])],
@@ -1749,6 +1878,9 @@ def cmd_recap(args: list[str]) -> None:
         lock.unlink(missing_ok=True)
     if what.startswith("failed"):
         die(f"recap of {f['name']} {what}")
+    if "--markdown" in args:
+        print(recap_markdown(recap, proof_list(f)), end="")
+        return
     print(f"{f['name']}: recap {what}")
     print(json.dumps({k: recap.get(k) for k in RECAP_KEYS}, indent=2, ensure_ascii=False))
 
