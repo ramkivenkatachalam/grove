@@ -601,7 +601,7 @@ function openRemembered() {
   for (const name of start) openProject(name, { review: process.env.GROVE_REVIEW === '1' })
 }
 
-// About Grove says which build is running and what it reads, so you can tell whether an update took.
+// About Grove says which build is running, so you can tell whether an update took, and where it reads from when that is unusual.
 // A packaged app reads version.json (stamped by `npm run dist`); a run from source asks git directly.
 function setAbout() {
   let info = null
@@ -617,13 +617,12 @@ function setAbout() {
     applicationName: 'Grove',
     applicationVersion: `${app.getVersion()}${info ? ` · ${info.short}` : ''}${info?.pr ? ` (#${info.pr})` : ''}`,
     version: info?.dirty ? `${build} · dirty` : build,
+    // only what differs from a normal install; the commit and PR are already in the version line
     credits: [
-      info?.subject,
-      info?.branch && `Branch: ${info.branch}${info.dirty ? ' (uncommitted changes)' : ''}`,
-      info?.repo,
-      `App: ${app.getAppPath()}`,
-      `Hub: ${HUB}`,
-      `CLI: ${BIN}`,
+      info?.branch && info.branch !== 'main' && `Branch: ${info.branch}`,
+      !app.isPackaged && `App: ${app.getAppPath()}`,
+      process.env.GROVE_HUB && `Hub: ${HUB}`,
+      process.env.GROVE_BIN && `CLI: ${BIN}`,
     ].filter(Boolean).join('\n'),
   })
 }
