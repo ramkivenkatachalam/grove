@@ -549,6 +549,146 @@ function RecapList({ glyph, word, items, colour, empty }) {
   )
 }
 
+// a recap from before the summary had a task list still reads as one
+const asList = (v) => (Array.isArray(v) ? v : [])
+function tasksOf(r) {
+  if (Array.isArray(r.tasks) && r.tasks.length) return r.tasks
+  return [...asList(r.done).map((text) => ({ text, state: 'done' })), ...(r.now ? [{ text: r.now, state: 'doing' }] : []),
+    ...asList(r.next).map((text) => ({ text, state: 'todo' }))]
+}
+const decisionsOf = (r) => asList(r.decisions).map((d) => (typeof d === 'string' ? { choice: d, why: '' } : d)).filter((d) => d?.choice)
+const TASK_LOOK = { done: { glyph: '✓', word: 'done' }, doing: { glyph: '▸', word: 'now' }, todo: { glyph: '○', word: 'to do' } }
+const CHECK_LOOK = { pass: { glyph: '✓', word: 'passed' }, fail: { glyph: '✗', word: 'failed' }, todo: { glyph: '○', word: 'not run yet' } }
+
+// the diagram from the recap, laid out in columns: each node one step right of everything that points at it
+const NODE_W = 156, NODE_H = 40, ROW_GAP = 16, PAD = 8
+function layout({ nodes, edges }) {
+  // edges that close a cycle (found depth first, in the model's node order) do not move columns:
+  // they are drawn back underneath instead
+  const out = Object.fromEntries(nodes.map((n) => [n.id, []]))
+  edges.forEach((e) => out[e.from].push(e))
+  const seen = {}, forward = []
+  const visit = (id) => {
+    seen[id] = 'open'
+    for (const e of out[id]) {
+      if (seen[e.to] === 'open') continue
+      forward.push(e)
+      if (!seen[e.to]) visit(e.to)
+    }
+    seen[id] = 'shut'
+  }
+  nodes.forEach((n) => seen[n.id] || visit(n.id))
+  const layer = Object.fromEntries(nodes.map((n) => [n.id, 0]))
+  for (let pass = 0; pass < nodes.length; pass++) { // longest path over what is now acyclic
+    let moved = false
+    for (const e of forward) {
+      if (layer[e.to] < layer[e.from] + 1) {
+        layer[e.to] = layer[e.from] + 1
+        moved = true
+      }
+    }
+    if (!moved) break
+  }
+  const cols = []
+  for (const n of nodes) (cols[layer[n.id]] ||= []).push(n)
+  const packed = cols.filter(Boolean)
+  const colOf = Object.fromEntries(packed.flatMap((col, ci) => col.map((n) => [n.id, ci])))
+  // wide enough for the longest edge label (about 6.5px a character at 11px), never under 64
+  const gap = Math.max(64, ...edges.map((e) => (e.label || '').length * 6.5 + 20))
+  const back = edges.some((e) => colOf[e.to] <= colOf[e.from])
+  const tallest = Math.max(...packed.map((c) => c.length))
+  const height = tallest * NODE_H + (tallest - 1) * ROW_GAP
+  const at = {}
+  packed.forEach((col, ci) => {
+    const top = (height - (col.length * NODE_H + (col.length - 1) * ROW_GAP)) / 2
+    col.forEach((n, ri) => { at[n.id] = { x: PAD + ci * (NODE_W + gap), y: PAD + top + ri * (NODE_H + ROW_GAP), col: ci } })
+  })
+  // room above for edge labels, and below for edges that go back
+  return { at, gap, width: PAD * 2 + packed.length * NODE_W + (packed.length - 1) * gap, height: PAD * 2 + height + (back ? NODE_H : 0) }
+}
+// a label in at most two lines of about 20 characters
+function wrap(label, width = 20) {
+  const words = label.split(' ')
+  const lines = ['']
+  for (const w of words) {
+    const line = lines[lines.length - 1]
+    if (line && (line + ' ' + w).length > width && lines.length < 2) lines.push(w)
+    else lines[lines.length - 1] = line ? `${line} ${w}` : w
+  }
+  return lines.map((l) => (l.length > width + 6 ? l.slice(0, width + 5) + '…' : l))
+}
+
+function Diagram({ diagram, pal }) {
+  const { at, gap, width, height } = useMemo(() => layout(diagram), [diagram])
+  const name = Object.fromEntries(diagram.nodes.map((n) => [n.id, n.label]))
+  const said = diagram.edges.map((e) => `${name[e.from]} ${e.label || 'to'} ${name[e.to]}`).join('; ')
+  return (
+    <div className="diagram">
+      <svg viewBox={`0 0 ${width} ${height}`} width={width} role="img" aria-label={`Diagram: ${said || diagram.nodes.map((n) => n.label).join(', ')}`}>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="var(--text-3)" />
+          </marker>
+        </defs>
+        {diagram.edges.map((e, i) => {
+          const a = at[e.from], b = at[e.to]
+          const forward = b.col > a.col
+          let d, lx, ly
+          if (forward) {
+            const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x - 2, y2 = b.y + NODE_H / 2
+            d = `M${x1} ${y1} C${x1 + gap / 2} ${y1} ${x2 - gap / 2} ${y2} ${x2} ${y2}`
+            lx = (x1 + x2) / 2
+            ly = (y1 + y2) / 2
+          } else { // back to an earlier column (or the same one): round underneath
+            const x1 = a.x + NODE_W / 2, y1 = a.y + NODE_H, x2 = b.x + NODE_W / 2, y2 = b.y + NODE_H + 2
+            const low = Math.max(y1, y2) + NODE_H * 0.8
+            d = `M${x1} ${y1} C${x1} ${low} ${x2} ${low} ${x2} ${y2}`
+            lx = (x1 + x2) / 2
+            ly = low - 6
+          }
+          return (
+            <g key={i}>
+              <path d={d} fill="none" stroke="var(--text-3)" strokeWidth="1.3" markerEnd="url(#arrow)" />
+              {e.label && <text x={lx} y={ly - 4} textAnchor="middle" className="diagram-edge">{e.label}</text>}
+            </g>
+          )
+        })}
+        {diagram.nodes.map((n) => {
+          const p = at[n.id]
+          const lines = wrap(n.label)
+          return (
+            <g key={n.id}>
+              <rect x={p.x} y={p.y} width={NODE_W} height={NODE_H} rx="7" fill="#242424" stroke={pal.accent} strokeWidth="1.2" />
+              {lines.map((l, i) => (
+                <text key={i} x={p.x + NODE_W / 2} y={p.y + NODE_H / 2 + (i - (lines.length - 1) / 2) * 14 + 4} textAnchor="middle" className="diagram-node">{l}</text>
+              ))}
+            </g>
+          )
+        })}
+      </svg>
+    </div>
+  )
+}
+
+// a screenshot kept with grove proof: loaded once it is on screen, opened in Preview on click
+function ProofShot({ f, shot }) {
+  const [src, setSrc] = useState(null)
+  useEffect(() => {
+    let live = true
+    hub.proof.image(f.name, shot.file).then((s) => live && setSrc(s))
+    return () => { live = false }
+  }, [f.name, shot.file])
+  const when = shot.at ? new Date(shot.at).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
+  return (
+    <li>
+      <button type="button" className="proof-shot" onClick={() => hub.proof.open(f.name, shot.file)} title={`Open ${shot.file} in Preview`}>
+        {src ? <img src={src} alt={shot.caption || shot.file} /> : <span className="proof-wait">loading…</span>}
+      </button>
+      <span className="proof-caption">{shot.caption || shot.file}{when && <span className="dim"> · {when}</span>}</span>
+    </li>
+  )
+}
+
 // the feature at a glance, written by `grove recap` after Claude's turns (or now, with Refresh)
 function Recap({ f, pal }) {
   const r = f.recap
@@ -567,27 +707,84 @@ function Recap({ f, pal }) {
     setBusy(false)
     if (res.code) setError((res.stderr || res.stdout).trim().replace(/^grove: /, ''))
   }
-  const list = (v) => (Array.isArray(v) ? v : [])
+  const tasks = r ? tasksOf(r) : []
+  const done = tasks.filter((t) => t.state === 'done').length
+  const decisions = r ? decisionsOf(r) : []
+  const checks = asList(r?.validation)
+  const shots = asList(f.proof).slice(-6).reverse()
+  const checkColour = { pass: pal.ready, fail: '#ff9b9b', todo: 'var(--text-3)' }
   return (
-    <section className="recap" aria-label="Recap">
+    <section className="recap" aria-label="Summary">
       <div className="recap-head">
-        <h2 className="recap-goal">{r?.goal || 'No recap yet'}</h2>
+        <div className="recap-title">
+          <h2 className="recap-goal">{r?.summary || r?.goal || 'No summary yet'}</h2>
+          {r?.summary && r.goal && <span className="recap-sub">{r.goal}</span>}
+        </div>
         {r?.updatedAt && <span className="recap-age">updated {ago(r.updatedAt)}</span>}
-        <button className="btn" onClick={refresh} disabled={busy} aria-label="Refresh the recap">{busy ? '↻ Refreshing…' : '↻ Refresh'}</button>
+        <button className="btn" onClick={refresh} disabled={busy} aria-label="Refresh the summary">{busy ? '↻ Refreshing…' : '↻ Refresh'}</button>
       </div>
       {error && <p className="recap-error" role="alert">Could not refresh: {error}</p>}
-      {r ? (
-        <div className="recap-grid">
-          <RecapList glyph="✓" word="Done" items={list(r.done)} colour={pal.ready} empty="nothing finished yet" />
-          <div className="recap-col">
-            <RecapList glyph="▸" word="Now" items={r.now ? [r.now] : []} colour={pal.working} />
-            <RecapList glyph="→" word="Next" items={list(r.next)} colour={pal.accent} />
+      {!r && <p className="busy">{busy ? 'Reading the conversation and git…' : 'Written after Claude’s next turn, or now with Refresh.'}</p>}
+      {r && (
+        <>
+          {(asList(r.why).length > 0 || decisions.length > 0) && (
+            <div className="recap-grid">
+              <RecapList glyph="?" word="Why" items={asList(r.why)} />
+              {decisions.length > 0 && (
+                <div className="recap-block">
+                  <h3><span aria-hidden="true">◆</span> Key decisions</h3>
+                  <ul>{decisions.map((d, i) => <li key={i}><b>{d.choice}</b>{d.why && <span className="dim"> — {d.why}</span>}</li>)}</ul>
+                </div>
+              )}
+            </div>
+          )}
+          {r.diagram?.nodes?.length > 1 && (
+            <div className="recap-block">
+              <h3><span aria-hidden="true">⇢</span> How it fits</h3>
+              <Diagram diagram={r.diagram} pal={pal} />
+            </div>
+          )}
+          <div className="recap-grid">
+            <div className="recap-block">
+              <h3><span aria-hidden="true">☑</span> Tasks{tasks.length > 0 && <span className="recap-count"> {done} of {tasks.length} done</span>}</h3>
+              {tasks.length > 0 && <div className="progress" role="img" aria-label={`${done} of ${tasks.length} tasks done`}><span style={{ width: `${(done / tasks.length) * 100}%`, background: pal.ready }} /></div>}
+              {tasks.length ? (
+                <ul className="tasks">
+                  {tasks.map((t, i) => {
+                    const look = TASK_LOOK[t.state] || TASK_LOOK.todo
+                    return (
+                      <li key={i} className={`task-${t.state}`} aria-label={`${look.word}: ${t.text}`}>
+                        <span className="task-glyph" aria-hidden="true" style={t.state === 'done' ? { color: pal.ready } : t.state === 'doing' ? { color: pal.working } : undefined}>{look.glyph}</span>
+                        <span>{t.text}{t.state === 'doing' && <span className="task-now" style={{ color: pal.working }}> now</span>}</span>
+                      </li>
+                    )
+                  })}
+                </ul>
+              ) : <p className="recap-none">no tasks yet</p>}
+            </div>
+            <RecapList glyph="❗" word="Blockers" items={asList(r.blockers)} colour={asList(r.blockers).length ? pal.waiting : undefined} empty="none" />
           </div>
-          <RecapList glyph="◆" word="Decisions" items={list(r.decisions)} />
-          <RecapList glyph="❗" word="Blockers" items={list(r.blockers)} colour={pal.waiting} empty="none" />
+        </>
+      )}
+      {(r || shots.length > 0) && (
+        <div className="recap-block">
+          <h3><span aria-hidden="true">✓</span> Validation</h3>
+          {checks.length > 0 && (
+            <ul className="tasks">
+              {checks.map((c, i) => {
+                const look = CHECK_LOOK[c.result] || CHECK_LOOK.todo
+                return (
+                  <li key={i}>
+                    <span className="task-glyph" aria-hidden="true" style={{ color: checkColour[c.result] || checkColour.todo }}>{look.glyph}</span>
+                    <span>{c.check} <span className="check-word" style={{ color: checkColour[c.result] || checkColour.todo }}>{look.word}</span></span>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+          {shots.length > 0 && <ul className="proof">{shots.map((s) => <ProofShot key={s.file} f={f} shot={s} />)}</ul>}
+          {!checks.length && !shots.length && <p className="recap-none">nothing checked yet — screenshots kept with <code>grove proof {f.name} &lt;image&gt; &lt;what it shows&gt;</code> appear here</p>}
         </div>
-      ) : (
-        <p className="busy">{busy ? 'Reading the conversation and git…' : 'Written after Claude’s next turn, or now with Refresh.'}</p>
       )}
     </section>
   )

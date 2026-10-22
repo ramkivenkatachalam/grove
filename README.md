@@ -172,7 +172,8 @@ to start a second Claude on a worktree that already has one.
 | `grove retro <name>` | Drafts the feature's retro (what went well, what didn't, what to try next time with an agent) into its `retro.md`, from its conversations, recap and git. The Summary tab's Retro section has the same button |
 | `grove send <name> <text…>` | Types text into a feature's Claude session as one message (starts the session if needed). The Summary tab's Scratchpad sends a selection this way |
 | `grove shot <name> [--clip \| --window \| <image>] [note…]` | A screenshot for the agent: drag a region (`--window`: click a window, `--clip`: the clipboard's image, or an image file). It is kept in the feature's `shots/` folder and its path pasted at Claude's prompt, which attaches it; a note sends it at once. In the app: ⌘⇧S, ⌘V of a copied image, or drop files on a terminal |
-| `grove recap <name> [--force]` | A scannable recap of a feature (goal, done, now, next, decisions, blockers) for its Summary tab. Sessions refresh it after each turn, at most every 3 minutes, and skip when nothing changed |
+| `grove proof <name> (<image> \| --clip) [caption…]` | Keeps a screenshot that shows the feature working, with a caption, in its `proof/` folder. The Summary tab shows them under Validation (click one to open it); briefs ask agents to keep the screenshots they check a change with. `--ls [--json]` lists them |
+| `grove recap <name> [--force]` | The feature's summary for its Summary tab: one line on what it does and where it stands, why, key decisions with their reasons, a task list (done, now, next), blockers, validation (checks and how they came out) and a small diagram of how the pieces connect. Sessions refresh it after each turn, at most every 3 minutes, and skip when nothing changed |
 | `grove statusline` | Claude Code's status line (install.sh sets it). In the app: model · context used/limit · cost · session time · lines changed, and it keeps the feature's `stats.json` for the Usage tab (⌃3: context meter by cache use, session totals, plan limits, and a button that runs `/context`) |
 | `grove keepawake [on\|off\|--status]` | Keeps the Mac awake while any agent is working (sessions start it; it lets go when all are idle). `off` turns it off |
 | `grove theme [palette]` · `grove ui app\|tmux` | Header palette · which front end new features open in |
@@ -260,7 +261,8 @@ State lives in `~/.grove/`, one folder per project and per feature:
 ~/.grove/projects/<project>/<feature>/feature.json   registry entry
                                      /status.json    session state, written by the mod
                                      /brief.md       the task; brief.sent.md once Claude has it
-                                     /recap.json     the Summary tab's recap (grove recap)
+                                     /recap.json     the Summary tab's summary (grove recap)
+                                     /proof/         screenshots that show it working (grove proof)
                                      /notes.md  retro.md   the Summary tab's Scratchpad and Retro
                                      /stats.json     the Usage tab: model, context, cost (grove statusline)
                                      /worktree/      the feature's git worktree
