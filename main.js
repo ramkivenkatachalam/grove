@@ -450,6 +450,7 @@ ipcMain.handle('ask', async (e, message, detail, buttons) => {
 const UPDATE_EVERY = 6 * 60 * 60 * 1000
 let update = null // the last `grove update --check --json`, plus { running } while an update runs
 let notifiedFor = ''
+let autoUpdate = null // `auto` from the last check; null until known, or when the CLI is too old to report it
 
 function updateItem() {
   if (update?.running) return { label: 'Updating Grove…', enabled: false }
@@ -461,12 +462,27 @@ function updateItem() {
   return { label: 'Check for Updates…', click: () => checkUpdate({ manual: true }) }
 }
 
+// The CLI owns the setting (autoUpdate in config.json); the menu only shows it and asks the CLI to change it.
+function autoUpdateItem() {
+  if (autoUpdate === null) return []
+  return [{ label: 'Update Automatically', type: 'checkbox', checked: autoUpdate, click: () => setAutoUpdate(!autoUpdate) }]
+}
+
+async function setAutoUpdate(on) {
+  const r = await grove(['update', '--auto', on ? 'on' : 'off'])
+  if (r.code) dialog.showMessageBox({ type: 'warning', message: 'Could not change Update Automatically', detail: (r.stderr || r.stdout).trim() })
+  else autoUpdate = on
+  lastMenuKey = '' // the click already flipped the tick; redraw it from what the CLI holds
+  buildMenu()
+}
+
 async function checkUpdate({ manual = false } = {}) {
   if (update?.running) return
   const r = await grove(['update', '--check', '--json'])
   let s = null
   try { s = JSON.parse(r.stdout) } catch { /* an older CLI, or git missing */ }
   update = s
+  if (typeof s?.auto === 'boolean') autoUpdate = s.auto
   buildMenu()
   if (!s) {
     if (manual) dialog.showMessageBox({ type: 'warning', message: 'Could not check for updates', detail: (r.stderr || r.stdout).trim() })
@@ -499,7 +515,7 @@ async function confirmUpdate() {
     type: 'question', buttons: ['Update', 'Later'], defaultId: 0, cancelId: 1, message: 'Update Grove?',
     detail: `It ${steps.join(' and ')}. Agents and services keep running in tmux. Running Claude sessions pick up mod changes when restarted.
 
-To update on its own while Grove is in the background: grove update --auto on`,
+To update on its own while Grove is in the background: Grove → Update Automatically`,
   })
   if (response === 0) runUpdate()
 }
@@ -524,7 +540,7 @@ function runUpdate() {
 let lastMenuKey = ''
 function buildMenu() {
   const list = projects()
-  const key = JSON.stringify([list.map((p) => p.name), updateItem().label])
+  const key = JSON.stringify([list.map((p) => p.name), updateItem().label, autoUpdate])
   if (key === lastMenuKey) return
   lastMenuKey = key
   const send = (action) => () => BrowserWindow.getFocusedWindow()?.webContents.send('menu', action)
@@ -537,6 +553,7 @@ function buildMenu() {
       submenu: [
         { role: 'about' },
         updateItem(),
+        ...autoUpdateItem(),
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
